@@ -1,0 +1,56 @@
+{
+  "generatedAt": "2026-10-22T11:23:00+05:30",
+  "generatedOnPlatform": "win32",
+  "projectType": "server",
+  "setup": [],
+  "assertions": [
+    {
+      "name": "all-clips-script-syntax",
+      "kind": "process",
+      "command": "node",
+      "args": ["--check", "all-clips.js"],
+      "verificationMethod": "exit-code",
+      "expected": "0",
+      "timeoutSeconds": 30
+    },
+    {
+      "name": "home-route-200",
+      "kind": "http-probe",
+      "startCommand": "python",
+      "startArgs": ["server.py"],
+      "cwd": ".",
+      "env": {
+        "PORT": "5055",
+        "CUTROOM_DATA": "H:\\YOUTUBE_CLIP_AUTOMATION\\.tsupgrader\\runtime-validation\\data"
+      },
+      "url": "http://127.0.0.1:5055/",
+      "verificationMethod": "http-status",
+      "expected": "200",
+      "timeoutSeconds": 120
+    },
+    {
+      "name": "health-route-200",
+      "kind": "http-probe",
+      "startCommand": "python",
+      "startArgs": ["server.py"],
+      "cwd": ".",
+      "env": {
+        "PORT": "5055",
+        "CUTROOM_DATA": "H:\\YOUTUBE_CLIP_AUTOMATION\\.tsupgrader\\runtime-validation\\data"
+      },
+      "url": "http://127.0.0.1:5055/api/health",
+      "verificationMethod": "http-status",
+      "expected": "200",
+      "timeoutSeconds": 120
+    },
+    {
+      "name": "tests-pass",
+      "kind": "process",
+      "command": "python",
+      "args": ["-m", "unittest", "discover", "-s", "tests", "-v"],
+      "verificationMethod": "test-results",
+      "expected": "0",
+      "timeoutSeconds": 600
+    }
+  ]
+}

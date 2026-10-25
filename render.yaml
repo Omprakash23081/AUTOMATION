@@ -1,0 +1,39 @@
+services:
+  - type: web
+    name: cutroom-api
+    runtime: docker
+    plan: starter
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    startCommand: gunicorn --config gunicorn.conf.py server:app
+    healthCheckPath: /api/health
+    autoDeploy: true
+    disk:
+      name: cutroom-data
+      mountPath: /var/data
+      sizeGB: 10
+    envVars:
+      - key: CUTROOM_PUBLIC_DEPLOYMENT
+        value: "true"
+      - key: CUTROOM_MODE
+        value: combined
+      - key: CUTROOM_DATA
+        value: /var/data
+      - key: CUTROOM_ALLOWED_HOSTS
+        value: cutroom-api.onrender.com
+      - key: CUTROOM_ALLOWED_ORIGINS
+        sync: false
+      - key: SESSION_SECRET
+        generateValue: true
+      - key: SESSION_COOKIE_SECURE
+        value: "true"
+      - key: SESSION_COOKIE_SAMESITE
+        value: Lax
+      - key: CUTROOM_SECRET_ENCRYPTION_KEY
+        sync: false
+      - key: CUTROOM_MAX_UPLOAD_BYTES
+        value: "4294967296"
+      - key: CUTROOM_EMAIL_MODE
+        value: disabled
+      - key: CUTROOM_PUBLIC_URL
+        sync: false

@@ -1,0 +1,23 @@
+// Workspace-scoped source videos and reusable image/audio assets.
+(function(){
+  async function showStorage(){
+    const root=plannerNav('storage');
+    root.innerHTML='<div class="module-head"><div><div class="eyebrow">WORKSPACE MEDIA</div><h1>Storage</h1><p>Manage source videos and reusable logos, images, and audio. Permanently deleting a source also removes its linked projects and edits.</p></div><label class="storage-upload-button">＋ Upload assets<input id="assetFiles" type="file" accept=".png,.jpg,.jpeg,.webp,.mp3,.m4a,.wav" multiple hidden></label></div><div class="storage-toolbar"><input id="assetSearch" type="search" placeholder="Search storage"><select id="assetFilter"><option value="">All storage</option><option value="video">Source videos</option><option value="image">Images & logos</option><option value="audio">Audio</option></select><span id="assetCount"></span></div><div id="assetGrid" class="asset-grid"><div class="planner-loading">Loading storage…</div></div>';
+    const input=root.querySelector('#assetFiles');input.addEventListener('change',async()=>{for(const file of input.files){const fd=new FormData();fd.append('file',file,file.name);try{await api('/api/assets',{method:'POST',body:fd});toast('Uploaded '+file.name)}catch(error){toast(file.name+': '+error.message)}}input.value='';await drawStorage()});
+    root.querySelector('#assetFilter').addEventListener('change',drawStorage);root.querySelector('#assetSearch').addEventListener('input',drawStorage);await drawStorage();
+  }
+  async function drawStorage(){
+    const grid=document.querySelector('#assetGrid');if(!grid)return;
+    try{
+      const [{assets},{videos}]=await Promise.all([api('/api/assets'),api('/api/storage/videos')]),query=document.querySelector('#assetSearch').value.toLowerCase(),kind=document.querySelector('#assetFilter').value;
+      const assetRows=assets.filter(a=>(!kind||a.type===kind)&&a.name.toLowerCase().includes(query)).map(a=>({...a,storageType:a.type}));
+      const videoRows=videos.filter(v=>(!kind||kind==='video')&&v.name.toLowerCase().includes(query)).map(v=>({...v,storageType:'video'}));
+      const rows=[...videoRows,...assetRows];
+      document.querySelector('#assetCount').textContent=rows.length+' items · reusable assets up to 100 MB each';
+      grid.innerHTML=rows.length?rows.map(a=>a.storageType==='video'?'<article class="asset-card"><div class="asset-preview"><video controls preload="metadata" src="/api/storage/videos/'+a.id+'/file"></video></div><div class="asset-info"><b title="'+esc(a.name)+'">'+esc(a.name)+'</b><small>Source video · '+formatBytes(a.bytes)+' · '+a.projects.length+' linked project'+(a.projects.length===1?'':'s')+'</small><span class="storage-project-names">'+esc(a.projects.map(p=>p.name).join(', '))+'</span><button type="button" class="storage-delete-video" data-delete-video="'+a.id+'">Delete permanently</button></div></article>':'<article class="asset-card"><div class="asset-preview">'+(a.type==='image'?'<img src="'+a.url+'" alt="'+esc(a.name)+'">':'<audio controls preload="none" src="'+a.url+'"></audio>')+'</div><div class="asset-info"><b title="'+esc(a.name)+'">'+esc(a.name)+'</b><small>'+esc(a.type==='image'?(a.width+' × '+a.height+' px'):'Audio · '+formatBytes(a.bytes))+' · '+formatBytes(a.bytes)+'</small><button type="button" data-delete-asset="'+a.id+'">Delete asset</button></div></article>').join(''):'<div class="planner-empty asset-empty">No matching storage items. Upload a PNG logo or audio file to reuse in clips, or add a source video.</div>';
+      grid.querySelectorAll('[data-delete-asset]').forEach(button=>button.addEventListener('click',async()=>{try{await api('/api/assets/'+button.dataset.deleteAsset,{method:'DELETE'});toast('Asset deleted.');await drawStorage()}catch(error){toast(error.message)}}));
+      grid.querySelectorAll('[data-delete-video]').forEach(button=>button.addEventListener('click',async()=>{if(!confirm('Permanently delete this source video and every linked project, clip, edit, caption, thumbnail, and export? This cannot be undone.'))return;button.disabled=true;try{const result=await api('/api/storage/videos/'+button.dataset.deleteVideo,{method:'DELETE'});toast(result.message||'Video and linked data permanently deleted.');await drawStorage()}catch(error){toast(error.message);button.disabled=false}}));
+    }catch(error){grid.textContent=error.message}
+  }
+  document.addEventListener('click',event=>{const button=event.target.closest('.nav-item[data-view="storage"]');if(!button)return;event.preventDefault();event.stopImmediatePropagation();showStorage()},true);
+})();

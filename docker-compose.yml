@@ -1,0 +1,106 @@
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    init: true
+    restart: unless-stopped
+    environment:
+      CUTROOM_DATA: /app/data
+      CUTROOM_MODE: api
+      PORT: "5000"
+      TMPDIR: /app/data/tmp
+      CUTROOM_BIND_HOST: 0.0.0.0
+      CUTROOM_TRUSTED_CLIENT_CIDRS: 172.30.88.0/24
+      CUTROOM_ALLOWED_HOSTS: 127.0.0.1,localhost,api
+      CUTROOM_MAX_UPLOAD_BYTES: ${CUTROOM_MAX_UPLOAD_BYTES:-4294967296}
+      SESSION_SECRET: ${SESSION_SECRET:?Set SESSION_SECRET in .env}
+      SESSION_COOKIE_SECURE: ${SESSION_COOKIE_SECURE:-false}
+      CUTROOM_SECRET_ENCRYPTION_KEY: ${CUTROOM_SECRET_ENCRYPTION_KEY:?Set CUTROOM_SECRET_ENCRYPTION_KEY in .env}
+      CUTROOM_EMAIL_MODE: ${CUTROOM_EMAIL_MODE:-disabled}
+      CUTROOM_PUBLIC_URL: ${CUTROOM_PUBLIC_URL:-}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_FROM: ${SMTP_FROM:-}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_STARTTLS: ${SMTP_STARTTLS:-true}
+      SMTP_USE_SSL: ${SMTP_USE_SSL:-false}
+    ports:
+      - "127.0.0.1:${PORT:-5000}:5000"
+    volumes:
+      - cutroom-data:/app/data
+    networks:
+      - cutroom-local
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5000/api/health', timeout=5)"
+      interval: 30s
+      timeout: 8s
+      retries: 3
+      start_period: 25s
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=512m
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    init: true
+    restart: unless-stopped
+    environment:
+      CUTROOM_DATA: /app/data
+      CUTROOM_MODE: worker
+      CUTROOM_INTERNAL_API_URL: http://api:5000
+      CUTROOM_CHATGPT_PROFILE_DIR: /app/data/chatgpt_profile
+      CUTROOM_CHATGPT_FALLBACK_PROFILE_DIR: /app/data/chatgpt_fallback_profile
+      CUTROOM_CHATGPT_HEADLESS: "true"
+      CUTROOM_CHATGPT_BROWSER_CHANNEL: ""
+      TMPDIR: /app/data/tmp
+      CUTROOM_TRUSTED_CLIENT_CIDRS: 172.30.88.0/24
+      CUTROOM_ALLOWED_HOSTS: 127.0.0.1,localhost
+      CUTROOM_MAX_UPLOAD_BYTES: ${CUTROOM_MAX_UPLOAD_BYTES:-4294967296}
+      SESSION_SECRET: ${SESSION_SECRET:?Set SESSION_SECRET in .env}
+      SESSION_COOKIE_SECURE: ${SESSION_COOKIE_SECURE:-false}
+    volumes:
+      - cutroom-data:/app/data
+    networks:
+      - cutroom-local
+    depends_on:
+      api:
+        condition: service_healthy
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=512m
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
+networks:
+  cutroom-local:
+    name: cutroom-local
+    ipam:
+      config:
+        - subnet: 172.30.88.0/24
+
+volumes:
+  cutroom-data:

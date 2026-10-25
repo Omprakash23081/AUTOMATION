@@ -1,0 +1,536 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="theme-color" content="#101114" />
+  <title>Cutroom — Turn long videos into short stories</title>
+  <script>
+    try {
+      if (localStorage.getItem("cutroom-theme") === "dark") {
+        document.documentElement.dataset.theme = "dark";
+      }
+    } catch (error) {
+      console.warn("Could not restore the saved theme preference.", error);
+    }
+  </script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link
+    href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&display=swap"
+    rel="stylesheet">
+  <link rel="stylesheet" href="styles.css" />
+  <link rel="stylesheet" href="production.css" />
+</head>
+
+<body>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <a class="brand" href="#" aria-label="Cutroom home"><span class="brand-mark">c</span><span>cutroom</span><span
+          class="beta">STUDIO</span></a>
+      <button class="workspace" id="workspaceButton" type="button">
+        <div class="workspace-icon">O</div>
+        <div><b>Creator workspace</b><small>Free plan</small></div><span class="chevron">⌄</span>
+      </button>
+      <div class="side-label">WORKSPACE</div>
+      <nav class="nav-list">
+        <button class="nav-item active" data-view="projects"><span>▦</span> Projects <kbd>⌘ 1</kbd></button>
+        <button class="nav-item" data-view="automation"><span>▶</span> Automation</button>
+        <button class="nav-item" data-view="clips"><span>◫</span> All clips</button>
+        <button class="nav-item" data-view="youtube-dashboard"><span>▶</span> YouTube dashboard</button>
+        <button class="nav-item" data-view="brand"><span>✳</span> Brand kit</button>
+        <button class="nav-item" data-view="storage"><span>▤</span> Storage</button>
+      </nav>
+      <div class="side-label second">PUBLISH</div>
+      <nav class="nav-list">
+        <button class="nav-item" data-view="calendar"><span>▦</span> Content calendar</button>
+      </nav>
+      <div class="sidebar-bottom">
+        <div class="upgrade-card">
+          <div class="sparkle">✦</div><b>Make more from every video</b>
+          <p>Get more processing time and export without limits.</p><button id="upgradeBtn">Explore plans
+            <span>↗</span></button>
+        </div>
+        <button class="profile" id="signOut"><span class="avatar">OK</span><span><b>Local creator</b><small>Sign
+              out</small></span><span class="dots">···</span></button>
+      </div>
+    </aside>
+
+    <main class="main">
+      <header class="topbar">
+        <div class="crumb">Workspace <span>/</span> <b id="crumbTitle">Projects</b></div>
+        <div class="top-actions"><button class="theme-toggle" id="themeToggle" type="button" aria-pressed="false">☾ <span>Dark mode</span></button><button class="key-button" id="keyButton">⚿ &nbsp; Connect AI</button><button
+            class="icon-button" title="About">?</button><button class="avatar mini" id="accountSettingsButton"
+            type="button" title="Account settings" aria-label="Account settings">OK</button></div>
+      </header>
+      <div class="content">
+        <div id="projectsView">
+        <section class="page-heading">
+          <div>
+            <div class="eyebrow"><span class="live-dot"></span> YOUR CREATOR STUDIO</div>
+            <h1 id="pageTitle">Make more from your long videos.</h1>
+            <p id="pageSubtitle">Find the moments worth sharing. Cut, caption, and shape them into clips.</p>
+          </div><button class="primary-button" id="newProject"><span>＋</span> New project</button>
+        </section>
+
+        <section class="create-card" id="createCard">
+          <div class="create-intro">
+            <div class="step-tag">START WITH A VIDEO <span>01</span></div>
+            <h2>One video. A whole lot of<br><em>good moments.</em></h2>
+            <p>Drop a file or paste a public YouTube link. We’ll help you find clips that stand on their own.</p>
+            <div class="trust-row"><span>↗</span> Your files stay yours <i></i><span>◷</span> Up to 3 hours
+              <i></i><span>▣</span> MP4, MOV, MP3</div>
+          </div>
+          <div class="intake">
+            <div class="source-tabs"><button class="source-tab selected" data-tab="upload">↑ &nbsp; Upload a
+                file</button><button class="source-tab" data-tab="youtube">▶ &nbsp; YouTube link</button></div>
+            <div class="dropzone" id="dropzone" tabindex="0" role="button" aria-label="Choose a video file"><input
+                id="fileInput" type="file" accept="video/mp4,video/quicktime,video/webm,audio/mpeg,audio/mp3" hidden>
+              <div class="upload-icon">↑</div><b>Drop your video here</b>
+              <p>or <button class="text-button" id="browseFiles">browse files</button></p><small>MP4, MOV, WebM or MP3 ·
+                up to 4 GB</small>
+            </div>
+            <div class="youtube-entry hidden" id="youtubeEntry"><label for="youtubeUrl">YouTube video URL</label>
+              <div class="url-row"><span>▶</span><input id="youtubeUrl" type="url"
+                  placeholder="https://www.youtube.com/watch?v=…"><button id="loadYoutube"
+                  aria-label="Use this URL">→</button></div><small>Paste a public video link to create a
+                project.</small>
+            </div>
+            <div class="source-status hidden" id="sourceStatus"></div>
+            <div class="intake-footer"><span><span class="lock">▣</span> Private by default</span><button
+                class="primary-button disabled" id="continueBtn" disabled>Set up clips <span>→</span></button></div>
+          </div>
+        </section>
+
+        <section class="how-strip">
+          <div><span class="strip-icon">✳</span><b>From long-form to ready-to-share.</b><span class="muted">Your
+              workflow, without the busywork.</span></div>
+          <div class="steps"><span><i>1</i> Add a video</span><span class="arrow">→</span><span><i>2</i> Pick your
+              moments</span><span class="arrow">→</span><span><i>3</i> Shape your clips</span></div>
+        </section>
+
+        <section class="projects-section">
+          <div class="section-head">
+            <div>
+              <div class="eyebrow">YOUR LIBRARY</div>
+              <h2>Recent projects <span class="count" id="projectCount">0</span></h2>
+            </div>
+            <div class="project-tools"><label class="search"><span>⌕</span><input id="searchInput"
+                  placeholder="Search projects"></label><label class="scope-label">Show<select class="sort-button"
+                  id="projectScope">
+                  <option value="active">Active</option>
+                  <option value="archived">Archived</option>
+                  <option value="all">All projects</option>
+                </select></label><label class="scope-label">Status<select class="sort-button" id="projectStatus">
+                  <option value="">Any</option>
+                  <option>Needs upload</option>
+                  <option>Ready to process</option>
+                  <option>Queued</option>
+                  <option>Checking saved source</option>
+                  <option>Inspecting cached source</option>
+                  <option>Reusing downloaded source</option>
+                  <option>Connecting to YouTube</option>
+                  <option>Downloading source</option>
+                  <option>Inspecting source</option>
+                  <option>Transcribing</option>
+                  <option>Reusing transcript</option>
+                  <option>Getting YouTube captions</option>
+                  <option>Finding clips</option>
+                  <option>Ranking moments with OpenAI</option>
+                  <option>Switching to Gemini</option>
+                  <option>Ranking moments with Gemini</option>
+                  <option>Queueing automatic Short renders</option>
+                  <option>Ready</option>
+                  <option>Failed</option>
+                </select></label><label class="scope-label">Source<select class="sort-button" id="projectSource">
+                  <option value="">Any</option>
+                  <option value="upload">Upload</option>
+                  <option value="youtube">YouTube</option>
+                </select></label><label class="scope-label">Sort<select class="sort-button" id="sortOrder">
+                  <option value="recent">Newest</option>
+                  <option value="oldest">Oldest</option>
+                  <option value="name">Name A–Z</option>
+                </select></label></div>
+          </div>
+          <div class="project-grid" id="projectGrid"></div>
+          <nav id="projectPagination" class="project-pagination hidden" aria-label="Project pages"><button
+              id="projectPrevious" type="button">← Previous</button><span id="projectPageLabel"></span><button
+              id="projectNext" type="button">Next →</button></nav>
+          <div class="empty-state" id="emptyState">
+            <div class="empty-art">
+              <div class="empty-window"><span>▶</span><i></i><i></i><i></i></div>
+              <div class="floating-chip">✳ clip ideas</div>
+            </div>
+            <h3>Your next great clip starts here.</h3>
+            <p>Bring in a long video to get your first set of clip ideas.</p><button class="text-button"
+              id="emptyCreate">Create a project <span>→</span></button>
+          </div>
+        </section>
+        <footer class="footer"><span>Cutroom Studio <span class="foot-dot">·</span> Your ideas, in
+            motion.</span><span>Made for the moments that matter.</span></footer>
+        </div>
+        <section id="youtubeView" class="youtube-view hidden">
+          <div class="page-heading youtube-heading">
+            <div>
+              <div class="eyebrow"><span class="live-dot"></span> YOUR CHANNELS, TOGETHER</div>
+              <h1>YouTube dashboard</h1>
+              <p>See your channel performance, recent videos, and publishing in one workspace.</p>
+            </div>
+            <button id="connectYoutube" class="primary-button" type="button"><span>＋</span> Connect YouTube account</button>
+          </div>
+          <div id="youtubeSetupNotice" class="youtube-notice hidden" role="status"></div>
+          <div id="youtubeError" class="youtube-notice youtube-notice-error hidden" role="alert"></div>
+          <div id="youtubeStats" class="youtube-stats">
+            <article class="youtube-stat"><span>CONNECTED CHANNELS</span><strong id="youtubeChannelCount">0</strong></article>
+            <article class="youtube-stat"><span>KNOWN SUBSCRIBERS</span><strong id="youtubeSubscriberTotal">—</strong></article>
+            <article class="youtube-stat"><span>LIFETIME CHANNEL VIEWS</span><strong id="youtubeViewTotal">—</strong></article>
+            <article class="youtube-stat"><span>UPLOADED VIDEOS</span><strong id="youtubeVideoTotal">—</strong></article>
+          </div>
+          <div class="youtube-section-heading">
+            <div><div class="eyebrow">CONNECTED CHANNELS</div><h2>Your channels</h2></div>
+            <div class="youtube-channel-tools">
+              <label class="youtube-sort-control" for="youtubeChannelSort">Sort
+                <select id="youtubeChannelSort" class="field-input">
+                  <option value="subscribers">Subscribers</option>
+                  <option value="views">Channel views</option>
+                  <option value="videos">Videos</option>
+                  <option value="name">Name</option>
+                </select>
+              </label>
+              <button id="refreshYoutube" class="secondary-button" type="button">Refresh overview</button>
+            </div>
+          </div>
+          <div id="youtubeChannelPicker" class="youtube-channel-picker" role="group" aria-label="Choose a channel"></div>
+          <div id="youtubeChannels" class="youtube-channel-list" aria-live="polite"></div>
+          <div id="youtubeEmpty" class="youtube-empty hidden">
+            <div class="youtube-empty-icon">▶</div>
+            <h2>Connect your first YouTube account</h2>
+            <p>Authorize Google securely to see your channels, recent videos, and basic performance metrics. Connect additional Google accounts to bring more channels into this workspace.</p>
+            <button id="connectYoutubeEmpty" class="primary-button" type="button">Connect YouTube account <span>→</span></button>
+          </div>
+          <div class="youtube-privacy-note">Channel access is scoped to this workspace. You can disconnect an account at any time.</div>
+        </section>
+        <section id="automationView" class="automation-view hidden">
+          <div class="page-heading automation-heading">
+            <div>
+              <div class="eyebrow"><span class="live-dot"></span> VIDEO AUTOMATION</div>
+              <h1>Automation workflows</h1>
+              <p>Run the YouTube Video Automation stages from this workspace without changing your Cutroom projects.</p>
+            </div>
+            <span id="automationSourceStatus" class="automation-status">Checking setup…</span>
+          </div>
+          <div class="automation-layout">
+            <section class="automation-card">
+              <div class="automation-card-heading"><div><div class="eyebrow">WORKFLOW RUNNER</div><h2>Start a workflow</h2></div></div>
+              <label class="field-label" for="automationWorkflow">Workflow</label>
+              <select class="field-input" id="automationWorkflow">
+                <option value="kuaishou">Kuaishou download and processing</option>
+                <option value="youtube_batch">YouTube batch download and captions</option>
+                <option value="gemini_transcribe">Gemini audio transcription</option>
+                <option value="chatgpt_hinglish">ChatGPT Hinglish transcripts</option>
+                <option value="whisper">Local Whisper transcription</option>
+                <option value="english_translation">Translate transcript to English</option>
+                <option value="cartesia_tts">Cartesia text-to-speech</option>
+                <option value="video_edit_sync">VIDEO EDIT AUTOMATION — sync Hindi dubbing</option>
+              </select>
+              <div class="automation-workflow-fields" data-workflow-fields="kuaishou">
+                <label class="field-label" for="kuaishouMode">Processing mode</label>
+                <select class="field-input" id="kuaishouMode"><option value="1">1 — Download video only</option><option value="2">2 — Download video and audio</option><option value="3" selected>3 — Video, audio and Gemini browser transcription</option><option value="4">4 — Full pipeline including Gemini and ChatGPT browsers</option></select>
+                <label class="field-label" for="kuaishouVideoTitle">Video title (optional filename suffix)</label>
+                <input class="field-input" id="kuaishouVideoTitle" maxlength="100" placeholder="Example: My Video">
+                <label class="field-label" for="kuaishouStartPart">Starting part number</label>
+                <input class="field-input" id="kuaishouStartPart" type="number" min="1" max="999999999" step="1" value="61">
+                <label class="field-label" for="kuaishouUrls">Kuaishou video URLs</label>
+                <textarea class="field-input automation-textarea" id="kuaishouUrls" placeholder="One HTTPS URL per line"></textarea>
+                <label class="field-label" for="kuaishouTargetFolder">Save results under (optional)</label>
+                <input class="field-input" id="kuaishouTargetFolder" placeholder="Existing local folder path">
+                <small class="automation-help">A new Cutroom-Kuaishou job folder with videos, audio and transcripts will be created here. Leave blank to use Cutroom storage.</small>
+              </div>
+              <div class="automation-workflow-fields hidden" data-workflow-fields="youtube_batch">
+                <label class="field-label" for="youtubeBatchUrls">YouTube video URLs</label>
+                <textarea class="field-input automation-textarea" id="youtubeBatchUrls" placeholder="One YouTube URL per line"></textarea>
+                <label class="field-label" for="youtubeTargetFolder">Save videos and captions under (optional)</label>
+                <input class="field-input" id="youtubeTargetFolder" placeholder="Existing local folder path">
+                <small class="automation-help">Cutroom creates videos and transcripts subfolders here. Leave blank to use Cutroom storage.</small>
+                <label class="field-label" for="youtubeTranscriptLanguage">Transcript language</label>
+                <select class="field-input" id="youtubeTranscriptLanguage"><option value="en">English</option><option value="hi">Hindi</option></select>
+                <fieldset class="automation-step-options">
+                  <legend class="field-label">Pipeline steps</legend>
+                  <label><input type="checkbox" name="youtubePipelineStep" value="download" checked><span>Download video</span></label>
+                  <label><input type="checkbox" name="youtubePipelineStep" value="transcript" checked><span>Transcript without timestamps</span></label>
+                  <label><input type="checkbox" name="youtubePipelineStep" value="english" checked><span>English transcript without timestamps</span></label>
+                  <label><input type="checkbox" name="youtubePipelineStep" value="tts" checked><span>Generate TTS audio</span></label>
+                  <label><input type="checkbox" name="youtubePipelineStep" value="timestamped_transcript" checked><span>Transcript with timestamps</span></label>
+                </fieldset>
+                <small class="automation-help">All steps are selected by default. Required earlier transcript steps run automatically only when their output is missing.</small>
+                <label class="field-label" for="youtubeNamePrefix">Output filename prefix</label>
+                <input class="field-input" id="youtubeNamePrefix" maxlength="100" value="YouTube" placeholder="Example: My Video">
+                <label class="field-label" for="youtubeStartNumber">Starting video number</label>
+                <input class="field-input" id="youtubeStartNumber" type="number" min="1" max="999999999" step="1" value="1">
+                <label class="field-label" for="youtubeCartesiaVoice">Cartesia character voice</label>
+                <select class="field-input" id="youtubeCartesiaVoice">
+                  <option value="">Default configured voice</option>
+                  <option value="kabir">Kabir</option>
+                  <option value="rohan">Rohan</option>
+                  <option value="denil">Denil</option>
+                  <option value="jacqueline_female">Jacqueline (Female)</option>
+                  <option value="other">Other (enter voice ID)</option>
+                </select>
+                <div id="youtubeCustomVoiceField" class="hidden">
+                  <label class="field-label" for="youtubeCustomCartesiaVoiceId">Custom Cartesia voice ID</label>
+                  <input class="field-input" id="youtubeCustomCartesiaVoiceId" maxlength="200" placeholder="Paste a Cartesia voice ID">
+                </div>
+                <small class="automation-help">Choose a character voice or select Other to enter a Cartesia voice ID. Default uses the configured voice. Videos, captions, and English speech are numbered together. A saved Cartesia API key is required only when TTS is selected. If English captions are unavailable, Hindi captions are used when available.</small>
+              </div>
+              <div class="automation-workflow-fields hidden" data-workflow-fields="gemini_transcribe chatgpt_hinglish whisper english_translation">
+                <label class="field-label" for="automationSourceFolder">Existing files folder</label>
+                <div class="automation-folder-row"><input class="field-input" id="automationSourceFolder" placeholder="Full local folder path"><button class="secondary-button" id="scanAutomationFolder" type="button">Scan folder</button></div>
+                <small class="automation-help">Folder paths are read by the Cutroom server on this computer. Existing files are only scanned or copied; they are never moved or deleted.</small>
+                <div id="automationReferenceFiles" class="automation-reference-files"></div>
+                <label class="field-label hidden" id="translationFileLabel" for="automationTranscriptFile">Transcript to translate</label>
+                <select class="field-input hidden" id="automationTranscriptFile"></select>
+              </div>
+              <div class="automation-workflow-fields hidden" data-workflow-fields="cartesia_tts">
+                <label class="field-label" for="cartesiaText">Text to speak</label>
+                <textarea class="field-input automation-textarea" id="cartesiaText" maxlength="30000" placeholder="Paste transcript text (up to 30,000 characters)"></textarea>
+              </div>
+              <div class="automation-workflow-fields hidden" data-workflow-fields="video_edit_sync">
+                <label class="field-label" for="videoEditVideoFile">Chinese source video</label>
+                <input class="field-input" id="videoEditVideoFile" type="file" accept=".mp4,.mov,.mkv,.webm" required>
+                <label class="field-label" for="videoEditAudioFile">Hindi dubbed audio</label>
+                <input class="field-input" id="videoEditAudioFile" type="file" accept=".mp3,.wav,.m4a,.aac,.flac,.ogg" required>
+                <label class="field-label" for="videoEditTranscriptFile">Timestamped Hindi transcript</label>
+                <input class="field-input" id="videoEditTranscriptFile" type="file" accept=".txt,text/plain" required>
+                <small class="automation-help">Use one transcript line per phrase, formatted like [00:00:02] मेरा नाम ओम है। Gemini will compare the Hindi text to the audio before editing.</small>
+              </div>
+              <label class="automation-authorize"><input id="automationAuthorized" type="checkbox"><span>I own or have permission to download the supplied videos.</span></label>
+              <label class="field-label" for="automationTimeout">Time limit (minutes)</label>
+              <input class="field-input" id="automationTimeout" type="number" min="1" max="1440" value="240">
+              <button class="primary-button automation-start" id="startAutomation" type="button">Start workflow <span>→</span></button>
+              <div id="automationMessage" class="automation-message hidden" role="status"></div>
+            </section>
+            <aside class="automation-side">
+              <section class="automation-card">
+                <div class="eyebrow">WORKSPACE CREDENTIALS</div><h2>Connect services</h2>
+                <p class="automation-help">YouTube batch requires a Cartesia API key only when TTS is selected. Kuaishou requires both its backend URL and API key. API keys are encrypted using Cutroom’s workspace secret key.</p>
+                <label class="field-label" for="automationApiUrl">Kuaishou API URL</label>
+                <input class="field-input" id="automationApiUrl" type="url" placeholder="https://your-kuaishou-backend-url">
+                <label class="field-label" for="automationApiKey">Kuaishou API key</label>
+                <input class="field-input" id="automationApiKey" type="password" autocomplete="new-password" placeholder="Leave blank to keep saved key">
+                <label class="field-label" for="automationCartesiaKey">Cartesia API key</label>
+                <input class="field-input" id="automationCartesiaKey" type="password" autocomplete="new-password" placeholder="Leave blank to keep saved key">
+                <button class="secondary-button automation-save" id="saveAutomationSettings" type="button">Save automation credentials</button>
+                <small id="automationCredentialStatus" class="automation-help"></small>
+              </section>
+            </aside>
+          </div>
+          <section class="automation-card automation-jobs">
+            <div class="automation-card-heading"><div><div class="eyebrow">RECENT ACTIVITY</div><h2>Automation jobs</h2></div><button id="refreshAutomationJobs" class="secondary-button" type="button">Refresh</button></div>
+            <div id="automationJobs" class="automation-job-list"><div class="automation-empty">No automation jobs yet.</div></div>
+          </section>
+        </section>
+      </div>
+    </main>
+  </div>
+
+  <div id="authScreen" class="auth-screen hidden">
+    <form id="authForm" class="auth-card"><a class="brand auth-brand" href="#"><span
+          class="brand-mark">c</span><span>cutroom</span></a>
+      <div class="eyebrow">YOUR CREATOR STUDIO</div>
+      <h1 id="authHeading">Create your creator workspace</h1>
+      <p>Projects and media are private to your workspace.</p><label data-register-only class="field-label">Your
+        name<input class="field-input" name="displayName" autocomplete="name" placeholder="Creator name"></label><label
+        class="field-label">Email<input class="field-input" name="email" type="email" required autocomplete="email"
+          placeholder="you@example.com"></label><label data-register-only class="field-label">Workspace name<input
+          class="field-input" name="workspaceName" placeholder="My studio"></label><label data-password-only
+        class="field-label">Password<input class="field-input" name="password" type="password" required minlength="12"
+          autocomplete="current-password" placeholder="At least 12 characters"></label>
+      <div id="authError" class="auth-error hidden"></div><button id="authSubmit"
+        class="primary-button auth-submit">Create account</button><button type="button" id="authToggle"
+        class="auth-toggle">Already have an account? Sign in</button><button type="button" id="forgotPassword"
+        class="auth-toggle hidden">Forgot password?</button><button type="button" id="resendVerification"
+        class="auth-toggle hidden">Resend verification email</button><small>When mail is configured, verify your email
+        and use password reset links from your inbox.</small>
+    </form>
+    <section id="resetPanel" class="auth-card hidden"><a class="brand auth-brand" href="#"><span
+          class="brand-mark">c</span><span>cutroom</span></a>
+      <div class="eyebrow">ACCOUNT SECURITY</div>
+      <h1>Choose a new password</h1>
+      <p>This one-time link expires after one hour.</p>
+      <form id="resetPasswordForm"><input type="hidden" id="resetToken"><label class="field-label">New password<input
+            class="field-input" id="resetPassword" type="password" minlength="12" required autocomplete="new-password"
+            placeholder="At least 12 characters"></label>
+        <div id="resetError" class="auth-error hidden"></div><button class="primary-button auth-submit"
+          type="submit">Change password</button>
+      </form>
+    </section>
+  </div>
+  <dialog id="setupDialog" class="modal">
+    <form method="dialog"><button class="close-modal" aria-label="Close">×</button></form>
+    <div class="eyebrow">PROJECT SETUP <span>02</span></div>
+    <h2>What should we look for?</h2>
+    <p>We’ll transcribe the source, find promising moments, and prepare editable clip drafts.</p><label
+      class="field-label" for="projectName">Project name</label><input class="field-input" id="projectName"
+      maxlength="70" placeholder="e.g. My podcast — episode 12">
+    <div class="setup-options"><label class="field-label">Maximum clip length (5–180 sec)<input class="field-input"
+          id="maxDuration" type="number" min="5" max="180" step="1" value="60" list="clipDurations"><datalist
+          id="clipDurations">
+          <option value="15">
+          <option value="30">
+          <option value="60">
+          <option value="90">
+        </datalist></label><label class="field-label">Number of clips<input class="field-input" id="clipCount"
+          type="number" min="1" max="20" step="1" value="8"></label><label class="field-label">Target platform<select
+          class="field-input" id="targetPlatform">
+          <option value="youtube_shorts">YouTube Shorts</option>
+          <option value="instagram_reels">Instagram Reels</option>
+          <option value="tiktok">TikTok</option>
+          <option value="linkedin">LinkedIn</option>
+          <option value="general">General short video</option>
+        </select></label><label class="field-label">Starting aspect ratio<select class="field-input" id="aspectRatio">
+          <option value="9:16">Portrait 9:16</option>
+          <option value="1:1">Square 1:1</option>
+          <option value="16:9">Landscape 16:9</option>
+        </select></label><label class="field-label">Transcription language<select class="field-input" id="language">
+          <option value="auto">Detect automatically</option>
+          <option value="en">English</option>
+          <option value="hi">Hindi</option>
+          <option value="es">Spanish</option>
+          <option value="fr">French</option>
+          <option value="de">German</option>
+          <option value="pt">Portuguese</option>
+          <option value="it">Italian</option>
+          <option value="ja">Japanese</option>
+          <option value="ko">Korean</option>
+          <option value="zh">Chinese</option>
+          <option value="ar">Arabic</option>
+          <option value="ru">Russian</option>
+          <option value="tr">Turkish</option>
+          <option value="bn">Bengali</option>
+          <option value="ur">Urdu</option>
+        </select></label></div><label class="field-label">What kind of moments?</label><textarea
+      class="field-input instruction-input" id="instructions"
+      placeholder="e.g. Find actionable tips, surprising opinions, and moments that make a great hook…"></textarea>
+    <div class="dialog-foot"><span>✦ &nbsp;Generated clips need your review.</span><button class="primary-button"
+        id="startProject" type="button">Create project <span>→</span></button></div>
+  </dialog>
+  <dialog id="keyDialog" class="modal compact-modal">
+    <form method="dialog"><button class="close-modal" aria-label="Close">×</button></form>
+    <div class="eyebrow">WORKSPACE AI SETTINGS</div>
+    <h2>AI provider keys</h2>
+    <p>Keys are scoped to this workspace. YouTube clip ranking tries OpenAI, then Gemini, then Groq, and falls back to a signed-in
+      ChatGPT browser if no API key is configured or every API request fails. Uploaded-audio transcription still
+      requires OpenAI. With `CUTROOM_SECRET_ENCRYPTION_KEY`, keys are encrypted at rest; otherwise, local combined mode
+      keeps them in server memory for this run. Provider usage is billed by the provider.</p>
+    <label class="field-label" for="apiKeyInput">OpenAI API key <span id="openaiKeyStatus"></span></label>
+    <input class="field-input" id="apiKeyInput" type="password" autocomplete="off" placeholder="sk-…">
+    <div class="dialog-foot"><a href="https://platform.openai.com/api-keys" target="_blank" rel="noreferrer">Get an OpenAI key ↗</a>
+      <button class="primary-button" id="saveKey" type="button">Save OpenAI key</button></div>
+    <button class="auth-toggle" id="removeKey" type="button">Remove OpenAI key</button>
+    <div class="key-note">OpenAI is used for uploaded-audio transcription and is the primary clip-ranking provider.</div>
+    <label class="field-label" for="geminiKeyInput">Google Gemini API key <span id="geminiKeyStatus"></span></label>
+    <input class="field-input" id="geminiKeyInput" type="password" autocomplete="off" placeholder="AIza…">
+    <div class="dialog-foot"><a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noreferrer">Get a Gemini key ↗</a>
+      <button class="primary-button" id="saveGeminiKey" type="button">Save Gemini key</button></div>
+    <button class="auth-toggle" id="removeGeminiKey" type="button">Remove Gemini key</button>
+    <div class="key-note">Gemini is used for YouTube clip ranking when OpenAI is unavailable or has reached its quota. Owners and admins can manage provider keys.</div>
+    <label class="field-label" for="groqKeyInput">Groq API key <span id="groqKeyStatus"></span></label>
+    <input class="field-input" id="groqKeyInput" type="password" autocomplete="off" placeholder="gsk_…">
+    <div class="dialog-foot"><a href="https://console.groq.com/keys" target="_blank" rel="noreferrer">Get a Groq key ↗</a>
+      <button class="primary-button" id="saveGroqKey" type="button">Save Groq key</button></div>
+    <button class="auth-toggle" id="removeGroqKey" type="button">Remove Groq key</button>
+    <div class="key-note">Groq is the final API provider for YouTube clip ranking. If it fails, Cutroom opens the signed-in ChatGPT browser.</div>
+  </dialog>
+  <dialog id="projectDialog" class="project-modal">
+    <form method="dialog"><button class="close-modal" aria-label="Close">×</button></form>
+    <div id="projectDetail"></div>
+  </dialog>
+  <dialog id="workspaceDialog" class="modal compact-modal">
+    <form method="dialog"><button class="close-modal" aria-label="Close">×</button></form>
+    <div class="eyebrow">TEAM & WORKSPACES</div>
+    <h2>Workspace access</h2>
+    <p>Choose a workspace or join one with an invitation token.</p>
+    <div id="workspaceList" class="workspace-list"></div>
+    <form id="joinWorkspaceForm"><label class="field-label" for="inviteToken">Invitation token</label><input
+        class="field-input" id="inviteToken" autocomplete="off" placeholder="Paste a token shared with you"><button
+        class="primary-button" type="submit">Join workspace</button></form>
+    <div id="teamAdmin" class="hidden">
+      <hr>
+      <h3>Workspace members</h3>
+      <div id="workspaceMemberList" class="workspace-member-list"></div>
+      <hr>
+      <h3>Invite a teammate</h3>
+      <form id="inviteForm"><label class="field-label">Teammate email<input class="field-input" type="email"
+            id="inviteEmail" required></label><label class="field-label">Role<select class="field-input"
+            id="inviteRole">
+            <option value="editor">Editor</option>
+            <option value="viewer">Viewer</option>
+            <option value="admin">Admin</option>
+          </select></label><button class="primary-button" type="submit">Create invitation</button></form>
+      <div id="inviteResult" class="hidden"></div><small>Invitation tokens are shown once. Share them securely; email
+        delivery is not configured.</small>
+    </div>
+    <div id="workspaceError" class="auth-error hidden"></div>
+  </dialog>
+  <dialog id="accountDialog" class="modal compact-modal">
+    <form method="dialog"><button class="close-modal" aria-label="Close">×</button></form>
+    <div class="eyebrow">ACCOUNT SETTINGS</div>
+    <h2>Manage your account</h2>
+    <p id="accountIdentity"></p>
+    <hr>
+    <h3>Delete your account and private workspace data</h3>
+    <p>Private workspaces where you are the only member and their media will be permanently removed. Shared workspace
+      content is retained when you leave. Transfer ownership or remove teammates before deleting an account that owns a
+      shared workspace. Running media jobs must finish first; queued jobs in private workspaces are deleted.</p>
+    <form id="deleteAccountForm"><label class="field-label">Current password<input class="field-input" name="password"
+          type="password" required autocomplete="current-password"></label><label class="field-label">Type DELETE to
+        confirm<input class="field-input" name="confirmation" required autocomplete="off" placeholder="DELETE"></label>
+      <div id="accountDeleteError" class="auth-error hidden"></div><button class="primary-button danger-button"
+        type="submit">Permanently delete account</button>
+    </form>
+  </dialog>
+  <dialog id="youtubeUploadDialog" class="modal youtube-upload-dialog">
+    <form method="dialog"><button class="close-modal" aria-label="Close">×</button></form>
+    <div class="eyebrow">YOUTUBE PUBLISHING</div>
+    <h2>Upload a video</h2>
+    <p>Choose a channel, review the details, and publish now or schedule a public release.</p>
+    <form id="youtubeUploadForm">
+      <label class="field-label" for="youtubeUploadChannel">Channel</label>
+      <select id="youtubeUploadChannel" class="field-input" required></select>
+      <label class="field-label" for="youtubeUploadTitle">Video title</label>
+      <input id="youtubeUploadTitle" class="field-input" maxlength="100" required placeholder="Add a clear title">
+      <label class="field-label" for="youtubeUploadDescription">Description</label>
+      <textarea id="youtubeUploadDescription" class="field-input youtube-description" maxlength="5000" placeholder="Tell viewers about this video"></textarea>
+      <label class="field-label" for="youtubeUploadFile">Video file</label>
+      <input id="youtubeUploadFile" class="field-input" type="file" accept="video/*" required>
+      <label class="field-label" for="youtubeUploadPrivacy">Visibility</label>
+      <select id="youtubeUploadPrivacy" class="field-input">
+        <option value="private">Private</option>
+        <option value="unlisted">Unlisted</option>
+        <option value="public">Public</option>
+      </select>
+      <label class="field-label" for="youtubePublishAt">Schedule for later (optional)</label>
+      <input id="youtubePublishAt" class="field-input" type="datetime-local">
+      <div id="youtubeUploadError" class="auth-error hidden" role="alert"></div>
+      <div class="dialog-foot"><span>Scheduled videos remain private until their publish time.</span><button id="youtubeUploadSubmit" class="primary-button" type="submit">Upload video <span>↑</span></button></div>
+    </form>
+  </dialog>
+  <div id="toast" class="toast" role="status"></div>
+  <script src="api-config.js"></script>
+  <script src="auth.js"></script>
+  <script src="app.js"></script>
+  <script src="automation.js"></script>
+  <script src="job-history.js"></script>
+  <script src="editor.js"></script>
+  <script src="transcript-search.js"></script>
+  <script src="project-actions.js"></script>
+  <script src="content-planner.js"></script>
+  <script src="media-library.js"></script>
+  <script src="all-clips.js"></script>
+  <script src="brand-kit.js"></script>
+  <script src="storage.js"></script>
+  <script src="youtube-dashboard.js"></script>
+</body>
+
+</html>

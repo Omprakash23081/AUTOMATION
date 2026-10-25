@@ -1,0 +1,12 @@
+.git
+.gitignore
+.venv
+venv
+__pycache__
+*.py[cod]
+data
+.cutroom-test-*
+.cutroom-worker-smoke
+tests
+docs
+.env
