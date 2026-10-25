@@ -2061,8 +2061,14 @@ class CutroomWorkflowTests(unittest.TestCase):
                 base_url="https://untrusted.example",
                 environ_base={**probe, "HTTP_HOST": "untrusted.example"},
             )
+            protected = client.get(
+                "/api/projects",
+                base_url="https://cutroom-api.onrender.com",
+                environ_base={**probe, "HTTP_HOST": "cutroom-api.onrender.com"},
+            )
         self.assertEqual(health.status_code, 200, health.get_data(as_text=True))
         self.assertEqual(rejected.status_code, 403, rejected.get_data(as_text=True))
+        self.assertEqual(protected.status_code, 401, protected.get_data(as_text=True))
 
     def test_local_agent_pairing_claims_only_its_users_jobs(self):
         token=uuid.uuid4().hex+uuid.uuid4().hex
