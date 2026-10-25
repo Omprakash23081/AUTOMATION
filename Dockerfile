@@ -24,5 +24,5 @@ COPY YOUTUBE_VIDEO_AUTOMATION/youtube_automation ./YOUTUBE_VIDEO_AUTOMATION/yout
 RUN mkdir -p /app/data/tmp && chown -R 10001:10001 /app
 USER 10001:10001
 
-EXPOSE 5000
+EXPOSE 10000
 CMD ["python", "server.py"]

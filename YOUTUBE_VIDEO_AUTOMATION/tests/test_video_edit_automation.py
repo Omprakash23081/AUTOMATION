@@ -1,5 +1,6 @@
 import io
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -771,6 +772,32 @@ class VideoEditAutomationTests(unittest.TestCase):
                     "Test render",
                     0,
                     100,
+                )
+
+        self.assertFalse(process_state["running"])
+        ffmpeg_process.wait.assert_called_once_with(timeout=5)
+        self.assertTrue(ffmpeg_process.stdout.closed)
+
+    def test_ffmpeg_progress_cancellation_stops_child(self):
+        process_state = {"running": True}
+        ffmpeg_process = SimpleNamespace(
+            stdout=io.StringIO("out_time_us=1000000\nprogress=continue\n"),
+            poll=lambda: None if process_state["running"] else 0,
+            terminate=lambda: process_state.update(running=False),
+            wait=Mock(return_value=0),
+            kill=Mock(),
+        )
+        cancel_event = threading.Event()
+        cancel_event.set()
+        with patch.object(video_edit.subprocess, "Popen", return_value=ffmpeg_process):
+            with self.assertRaises(video_edit.ProcessingCancelled):
+                video_edit._run_ffmpeg_with_progress(
+                    ["ffmpeg", "output.mp4"],
+                    10,
+                    "Test render",
+                    0,
+                    100,
+                    cancel_event=cancel_event,
                 )
 
         self.assertFalse(process_state["running"])

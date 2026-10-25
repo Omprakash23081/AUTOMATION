@@ -478,6 +478,23 @@
     <div class="eyebrow">ACCOUNT SETTINGS</div>
     <h2>Manage your account</h2>
     <p id="accountIdentity"></p>
+    <section class="local-agent-settings">
+      <hr>
+      <h3>Windows local agent</h3>
+      <p>Pair an approved Windows test computer. Its agent credentials stay protected on that computer.</p>
+      <p>For local video sync, start <code>.\start_local_agent.bat run --api-url https://cutroom7.netlify.app</code> from the repository folder. In another PowerShell window, run <code>.\start_local_agent.bat process-video --api-url https://cutroom7.netlify.app</code> to choose files on that computer.</p>
+      <form id="localAgentPairForm">
+        <label class="field-label" for="localAgentPairCode">Pairing code</label>
+        <input class="field-input" id="localAgentPairCode" autocomplete="one-time-code" maxlength="16"
+          placeholder="16-character code" required>
+        <button class="primary-button" type="submit">Pair computer</button>
+      </form>
+      <div id="localAgentError" class="auth-error hidden" role="alert"></div>
+      <div id="localAgentList" class="workspace-member-list" aria-live="polite"></div>
+      <button id="queueAgentSelfTest" class="secondary-button" type="button">Queue harmless agent test</button>
+      <div id="localAgentJobs" class="workspace-member-list" aria-live="polite"></div>
+      <small>For this private test phase, only accounts explicitly allowlisted by the administrator can pair agents.</small>
+    </section>
     <hr>
     <h3>Delete your account and private workspace data</h3>
     <p>Private workspaces where you are the only member and their media will be permanently removed. Shared workspace

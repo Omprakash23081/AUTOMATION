@@ -19,6 +19,10 @@ services:
         value: combined
       - key: CUTROOM_DATA
         value: /var/data
+      - key: DATABASE_URL
+        sync: false
+      - key: CUTROOM_AGENT_TESTER_EMAILS
+        sync: false
       - key: CUTROOM_ALLOWED_HOSTS
         sync: false
       - key: CUTROOM_ALLOWED_ORIGINS

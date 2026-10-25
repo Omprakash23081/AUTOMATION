@@ -1,9 +1,11 @@
 import io
+import hashlib
 import json
 import os
 import re
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import unittest
@@ -15,6 +17,9 @@ from types import SimpleNamespace
 from pathlib import Path
 from flask.testing import FlaskClient
 from unittest.mock import MagicMock, Mock, patch
+from backend.agent_store import AgentStore
+from local_agent.client import AgentApi
+from local_agent.runner import AgentRunner
 
 _data = str(Path(__file__).resolve().parents[1] / "data" / "test-suite")
 Path(_data).mkdir(parents=True,exist_ok=True)
@@ -54,6 +59,10 @@ class CutroomWorkflowTests(unittest.TestCase):
 
     def setUp(self):
         server.app.config["TESTING"] = True
+        self.original_agent_store=server.agent_store
+        self.agent_temp_dir=tempfile.TemporaryDirectory()
+        server.agent_store=AgentStore(sqlite_path=Path(self.agent_temp_dir.name)/"agent-control.sqlite3")
+        self.addCleanup(self._restore_agent_store)
         server.AUTH_RATE_LIMITS={path:(1000,seconds,dimensions) for path,(_,seconds,dimensions) in server.AUTH_RATE_LIMITS.items()}
         self.client = server.app.test_client()
         with server.db() as con:
@@ -62,11 +71,26 @@ class CutroomWorkflowTests(unittest.TestCase):
         self.project_ids = []
         self.email=uuid.uuid4().hex+"@example.test"
         self.extra_accounts=[]
+        self.agent_ids=[]
+        self.agent_token_hashes=[]
         signup=self.client.post("/api/auth/register",json={"email":self.email,"password":"local-test-password-123","displayName":"Test User"})
         self.assertEqual(signup.status_code,201,signup.json)
         self.workspace_id=signup.json["workspace"]["id"]
 
+    def _restore_agent_store(self):
+        server.agent_store=self.original_agent_store
+        self.agent_temp_dir.cleanup()
+
     def tearDown(self):
+        if self.agent_ids or self.agent_token_hashes:
+            with server.agent_store.connection() as con:
+                for workspace_id in [self.workspace_id]+[wid for _,wid in self.extra_accounts]:
+                    con.execute("DELETE FROM local_agent_jobs WHERE workspace_id=?",(workspace_id,))
+                for agent_id in self.agent_ids:
+                    con.execute("DELETE FROM local_agent_pairs WHERE agent_id=?",(agent_id,))
+                    con.execute("DELETE FROM local_agents WHERE id=?",(agent_id,))
+                for token_hash in self.agent_token_hashes:
+                    con.execute("DELETE FROM local_agent_pairs WHERE token_hash=?",(token_hash,))
         with server.db() as con:
             assets=con.execute("SELECT id,path FROM media_assets WHERE workspace_id=?",(self.workspace_id,)).fetchall()
             uploads=con.execute("SELECT temp_path FROM upload_sessions WHERE workspace_id=?",(self.workspace_id,)).fetchall()
@@ -1992,6 +2016,224 @@ class CutroomWorkflowTests(unittest.TestCase):
         finally:
             with server.key_lock:server.workspace_api_keys.clear();server.workspace_api_keys.update(previous_keys)
         self.assertEqual(self.client.get("/api/health").json["ffmpeg"], True)
+
+    def test_public_hosts_include_render_hostname_without_wildcard(self):
+        with patch.dict(
+            os.environ,
+            {
+                "CUTROOM_ALLOWED_HOSTS": "cutroom7.netlify.app",
+                "RENDER_EXTERNAL_HOSTNAME": "cutroom-api.onrender.com",
+            },
+            clear=False,
+        ):
+            self.assertEqual(
+                server.public_allowed_hosts(),
+                {"cutroom7.netlify.app", "cutroom-api.onrender.com"},
+            )
+        with patch.dict(
+            os.environ,
+            {
+                "CUTROOM_ALLOWED_HOSTS": "cutroom7.netlify.app",
+                "RENDER_EXTERNAL_HOSTNAME": "",
+            },
+            clear=False,
+        ):
+            self.assertEqual(server.public_allowed_hosts(), {"cutroom7.netlify.app"})
+
+    def test_public_health_check_allows_render_probe_but_rejects_unknown_host(self):
+        client = server.app.test_client()
+        probe = {"REMOTE_ADDR": "198.51.100.7"}
+        with patch.object(server, "PUBLIC_DEPLOYMENT", True), patch.dict(
+            os.environ,
+            {
+                "CUTROOM_ALLOWED_HOSTS": "cutroom7.netlify.app",
+                "RENDER_EXTERNAL_HOSTNAME": "cutroom-api.onrender.com",
+            },
+            clear=False,
+        ):
+            health = client.get(
+                "/api/health",
+                base_url="https://cutroom-api.onrender.com",
+                environ_base={**probe, "HTTP_HOST": "cutroom-api.onrender.com"},
+            )
+            rejected = client.get(
+                "/api/health",
+                base_url="https://untrusted.example",
+                environ_base={**probe, "HTTP_HOST": "untrusted.example"},
+            )
+        self.assertEqual(health.status_code, 200, health.get_data(as_text=True))
+        self.assertEqual(rejected.status_code, 403, rejected.get_data(as_text=True))
+
+    def test_local_agent_pairing_claims_only_its_users_jobs(self):
+        token=uuid.uuid4().hex+uuid.uuid4().hex
+        token_hash=hashlib.sha256(token.encode()).hexdigest()
+        self.agent_token_hashes.append(token_hash)
+        start=self.client.post("/api/agent/pair/start",json={"token":token,"name":"Test Windows PC"})
+        self.assertEqual(start.status_code,201,start.json)
+        paired=self.client.post("/api/agents/pair/approve",json={"pairCode":start.json["pairCode"]})
+        self.assertEqual(paired.status_code,201,paired.json)
+        agent_id=paired.json["agent"]["id"]
+        self.agent_ids.append(agent_id)
+        status=self.client.get("/api/agent/pair/status",headers={"Authorization":"Bearer "+token})
+        self.assertEqual(status.status_code,200,status.json)
+        self.assertEqual(status.json["status"],"Paired")
+
+        own=self.client.post("/api/agent/jobs",json={
+            "sourceType":"youtube","sourceUrl":"https://youtu.be/dQw4w9WgXcQ","clipCount":2
+        })
+        self.assertEqual(own.status_code,201,own.json)
+        other=server.app.test_client()
+        other_email=uuid.uuid4().hex+"@example.test"
+        signup=other.post("/api/auth/register",json={
+            "email":other_email,"password":"local-test-password-123","displayName":"Other User"
+        })
+        self.assertEqual(signup.status_code,201,signup.json)
+        self.extra_accounts.append((other_email,signup.json["workspace"]["id"]))
+        other_job=other.post("/api/agent/jobs",json={
+            "sourceType":"youtube","sourceUrl":"https://youtu.be/dQw4w9WgXcQ","clipCount":1
+        })
+        self.assertEqual(other_job.status_code,201,other_job.json)
+        self.assertEqual(
+            self.client.get("/api/agent/jobs/"+other_job.json["job"]["id"]).status_code,404
+        )
+
+        claimed=self.client.post(
+            "/api/agent/runtime/jobs/claim",headers={"Authorization":"Bearer "+token}
+        )
+        self.assertEqual(claimed.status_code,200,claimed.json)
+        self.assertEqual(claimed.json["job"]["id"],own.json["job"]["id"])
+        self.assertEqual(
+            self.client.post("/api/agent/runtime/jobs/claim",headers={"Authorization":"Bearer "+token}).json["job"],
+            None,
+        )
+        cross_user_update=self.client.post(
+            "/api/agent/runtime/jobs/"+other_job.json["job"]["id"]+"/status",
+            headers={"Authorization":"Bearer "+token},
+            json={"status":"Succeeded","outputLocation":"C:\\Users\\Other\\output.mp4"},
+        )
+        self.assertEqual(cross_user_update.status_code,409,cross_user_update.json)
+        completed=self.client.post(
+            "/api/agent/runtime/jobs/"+own.json["job"]["id"]+"/status",
+            headers={"Authorization":"Bearer "+token},
+            json={"status":"Succeeded","stage":"Export complete","progress":100,"outputLocation":"C:\\Users\\Test\\output.mp4"},
+        )
+        self.assertEqual(completed.status_code,200,completed.json)
+        own_status=self.client.get("/api/agent/jobs/"+own.json["job"]["id"])
+        self.assertEqual(own_status.json["job"]["status"],"Succeeded")
+        self.assertEqual(own_status.json["job"]["output_location"],"C:\\Users\\Test\\output.mp4")
+
+    def test_local_agent_job_payload_rejects_credentials(self):
+        response=self.client.post("/api/agent/jobs",json={
+            "sourceType":"youtube","sourceUrl":"https://youtu.be/dQw4w9WgXcQ","apiKey":"must-not-be-stored"
+        })
+        self.assertEqual(response.status_code,400,response.json)
+
+    def test_local_agent_harmless_job_end_to_end_without_browser_credentials(self):
+        token=uuid.uuid4().hex+uuid.uuid4().hex
+        token_hash=hashlib.sha256(token.encode()).hexdigest()
+        self.agent_token_hashes.append(token_hash)
+        api=AgentApi(
+            "https://cutroom7.netlify.app",
+            transport=lambda method,path,body,bearer: self._agent_flask_transport(method,path,body,bearer),
+        )
+        pairing=api.start_pairing("E2E Windows agent",token)
+        paired=self.client.post("/api/agents/pair/approve",json={"pairCode":pairing["pairCode"]})
+        self.assertEqual(paired.status_code,201,paired.json)
+        self.agent_ids.append(paired.json["agent"]["id"])
+        api.token=token
+
+        submitted=self.client.post("/api/agent/jobs",json={
+            "jobType":"agent_self_test","message":"confirm local agent connection"
+        })
+        self.assertEqual(submitted.status_code,201,submitted.json)
+        runner=AgentRunner(api,wait=lambda _:None)
+
+        self.assertTrue(runner.process_one())
+        self.assertFalse(runner.process_one())
+        result=self.client.get("/api/agent/jobs/"+submitted.json["job"]["id"])
+        self.assertEqual(result.status_code,200,result.json)
+        self.assertEqual(result.json["job"]["status"],"Succeeded")
+        self.assertEqual(result.json["job"]["stage"],"Self-test passed")
+
+    def test_agent_video_job_accepts_only_opaque_local_references(self):
+        token=uuid.uuid4().hex+uuid.uuid4().hex
+        token_hash=hashlib.sha256(token.encode()).hexdigest()
+        self.agent_token_hashes.append(token_hash)
+        started=self.client.post(
+            "/api/agent/pair/start",json={"token":token,"name":"Video tester PC"}
+        )
+        paired=self.client.post(
+            "/api/agents/pair/approve",json={"pairCode":started.json["pairCode"]}
+        )
+        self.assertEqual(paired.status_code,201,paired.json)
+        self.agent_ids.append(paired.json["agent"]["id"])
+        bearer={"Authorization":"Bearer "+token}
+        submission={
+            "jobType":"video_sync",
+            "videoRef":"a"*32,
+            "audioRef":"b"*32,
+            "outputRef":"c"*32,
+        }
+        created=server.app.test_client().post(
+            "/api/agent/runtime/jobs",json=submission,headers=bearer
+        )
+        self.assertEqual(created.status_code,201,created.json)
+
+        claimed=server.app.test_client().post(
+            "/api/agent/runtime/jobs/claim",json={},headers=bearer
+        )
+        self.assertEqual(claimed.status_code,200,claimed.json)
+        self.assertEqual(claimed.json["job"]["payload"],submission)
+        self.assertNotIn("videoPath",claimed.json["job"]["payload"])
+        self.assertNotIn("audioPath",claimed.json["job"]["payload"])
+
+        invalid=server.app.test_client().post(
+            "/api/agent/runtime/jobs",
+            json={**submission,"videoPath":"C:\\Users\\Other\\private.mp4"},
+            headers=bearer,
+        )
+        self.assertEqual(invalid.status_code,400,invalid.json)
+
+    @staticmethod
+    def _agent_flask_transport(method,path,body,bearer):
+        client=server.app.test_client()
+        headers={"Authorization":"Bearer "+bearer} if bearer else {}
+        response=client.open(path,method=method,json=body,headers=headers)
+        data=response.get_json(silent=True) or {}
+        if response.status_code>=400:
+            from local_agent.client import AgentApiError
+            raise AgentApiError(response.status_code,data.get("error","API error"))
+        return data
+
+    def test_local_agent_runtime_requires_bearer_authentication(self):
+        response=server.app.test_client().post("/api/agent/runtime/jobs/claim",json={})
+        self.assertEqual(response.status_code,401,response.json)
+
+    def test_revoking_agent_cancels_its_active_job_and_token(self):
+        token=uuid.uuid4().hex+uuid.uuid4().hex
+        token_hash=hashlib.sha256(token.encode()).hexdigest()
+        self.agent_token_hashes.append(token_hash)
+        started=self.client.post("/api/agent/pair/start",json={"token":token,"name":"Revocation test"})
+        paired=self.client.post("/api/agents/pair/approve",json={"pairCode":started.json["pairCode"]})
+        self.assertEqual(paired.status_code,201,paired.json)
+        agent_id=paired.json["agent"]["id"]
+        self.agent_ids.append(agent_id)
+        queued=self.client.post("/api/agent/jobs",json={"jobType":"agent_self_test"})
+        self.assertEqual(queued.status_code,201,queued.json)
+        claimed=server.app.test_client().post(
+            "/api/agent/runtime/jobs/claim",headers={"Authorization":"Bearer "+token}
+        )
+        job_id=claimed.json["job"]["id"]
+
+        revoked=self.client.delete("/api/agents/"+agent_id)
+        after_revoke=server.app.test_client().post(
+            "/api/agent/runtime/jobs/claim",headers={"Authorization":"Bearer "+token}
+        )
+        job=self.client.get("/api/agent/jobs/"+job_id)
+
+        self.assertEqual(revoked.status_code,200,revoked.json)
+        self.assertEqual(after_revoke.status_code,401,after_revoke.json)
+        self.assertEqual(job.json["job"]["status"],"Canceled")
 
     @classmethod
     def tearDownClass(cls):

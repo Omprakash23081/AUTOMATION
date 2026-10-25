@@ -72,9 +72,67 @@ document.addEventListener('DOMContentLoaded',()=>{
     }
   }
   function showWorkspaceError(message){const error=document.getElementById('workspaceError');error.textContent=message;error.classList.remove('hidden')}
+  function showLocalAgentError(message){const error=document.getElementById('localAgentError');error.textContent=message;error.classList.remove('hidden')}
+  async function refreshLocalAgents(){
+    const list=document.getElementById('localAgentList');list.replaceChildren();
+    try{
+      const result=await api('/api/agents');
+      result.agents.forEach(agent=>{
+        const row=document.createElement('div');row.className='workspace-member';
+        const identity=document.createElement('span');identity.className='workspace-member-identity';
+        identity.textContent=agent.name+' · '+(agent.status==='Active'?(agent.online?'Online':'Offline'):agent.status);
+        row.append(identity);
+        if(agent.status==='Active'){
+          const revoke=document.createElement('button');revoke.type='button';revoke.className='remove-member';revoke.textContent='Revoke';
+          revoke.addEventListener('click',async()=>{
+            if(!window.confirm('Revoke '+agent.name+'? The agent will no longer be able to claim jobs.'))return;
+            try{await api('/api/agents/'+encodeURIComponent(agent.id),{method:'DELETE'});await refreshLocalAgents()}
+            catch(error){showLocalAgentError(error.message)}
+          });
+          row.append(revoke);
+        }
+        list.append(row);
+      });
+      const jobs=await api('/api/agent/jobs'),jobList=document.getElementById('localAgentJobs');jobList.replaceChildren();
+      jobs.jobs.slice(0,5).forEach(job=>{
+        const row=document.createElement('div');row.className='workspace-member';
+        const identity=document.createElement('span');identity.className='workspace-member-identity';
+        const detail=job.output_location||job.error||'';
+        identity.textContent=job.stage+' · '+job.status+' · '+job.progress+'%'+(detail?' · '+detail:'');
+        row.append(identity);jobList.append(row);
+        if(job.status==='Queued'||job.status==='Running'){
+          const cancel=document.createElement('button');cancel.type='button';cancel.className='remove-member';cancel.textContent='Cancel';
+          cancel.addEventListener('click',async()=>{
+            cancel.disabled=true;
+            try{await api('/api/agent/jobs/'+encodeURIComponent(job.id)+'/cancel',{method:'POST'});await refreshLocalAgents()}
+            catch(error){showLocalAgentError(error.message);cancel.disabled=false}
+          });
+          row.append(cancel);
+        }
+      });
+    }catch(error){showLocalAgentError(error.message)}
+  }
   refreshIdentity().catch(()=>{});
   document.getElementById('workspaceButton').addEventListener('click',async()=>{document.getElementById('workspaceError').classList.add('hidden');try{await refreshIdentity();document.getElementById('workspaceDialog').showModal()}catch(error){showWorkspaceError(error.message)}});
-  document.getElementById('accountSettingsButton').addEventListener('click',()=>{document.getElementById('accountDeleteError').classList.add('hidden');document.getElementById('accountDialog').showModal()});
+  document.getElementById('accountSettingsButton').addEventListener('click',()=>{document.getElementById('accountDeleteError').classList.add('hidden');document.getElementById('localAgentError').classList.add('hidden');document.getElementById('accountDialog').showModal();refreshLocalAgents()});
+  document.getElementById('localAgentPairForm').addEventListener('submit',async event=>{
+    event.preventDefault();
+    const input=document.getElementById('localAgentPairCode'),button=event.currentTarget.querySelector('button[type="submit"]');
+    button.disabled=true;document.getElementById('localAgentError').classList.add('hidden');
+    try{
+      const result=await api('/api/agents/pair/approve',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({pairCode:input.value.trim()})});
+      input.value='';toast('Paired '+result.agent.name+'.');await refreshLocalAgents();
+    }catch(error){showLocalAgentError(error.message)}
+    finally{button.disabled=false}
+  });
+  document.getElementById('queueAgentSelfTest').addEventListener('click',async event=>{
+    const button=event.currentTarget;button.disabled=true;document.getElementById('localAgentError').classList.add('hidden');
+    try{
+      await api('/api/agent/jobs',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({jobType:'agent_self_test',message:'Private tester self-test'})});
+      toast('Harmless local-agent test queued.');await refreshLocalAgents();
+    }catch(error){showLocalAgentError(error.message)}
+    finally{button.disabled=false}
+  });
   document.getElementById('deleteAccountForm').addEventListener('submit',async event=>{
     event.preventDefault();const deleteForm=event.currentTarget,fields=new FormData(deleteForm),button=deleteForm.querySelector('button[type="submit"]');button.disabled=true;
     try{await api('/api/auth/account',{method:'DELETE',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:fields.get('password'),confirmation:fields.get('confirmation')})});document.getElementById('accountDialog').close();deleteForm.reset();document.getElementById('accountSettingsButton').textContent='OK';document.getElementById('accountIdentity').textContent='';screen.classList.remove('hidden');setMode('login');form.elements.email.value='';document.getElementById('authError').textContent='Your account and private workspace data were deleted.';document.getElementById('authError').classList.remove('hidden');toast('Account deleted.')}

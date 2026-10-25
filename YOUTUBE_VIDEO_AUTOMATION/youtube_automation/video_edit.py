@@ -12,11 +12,24 @@ from collections import deque
 from pathlib import Path
 
 import imageio_ffmpeg
-from playwright.sync_api import Error as PlaywrightError, TimeoutError, sync_playwright
 
 from . import config
-from .chatgpt import browser as chatgpt_browser
-from .gemini import browser as gemini_browser
+
+
+class _LazyChatGPTBrowser:
+    def __getattr__(self, name):
+        from .chatgpt import browser
+
+        return getattr(browser, name)
+
+
+chatgpt_browser = _LazyChatGPTBrowser()
+
+
+def sync_playwright():
+    from playwright.sync_api import sync_playwright as playwright_factory
+
+    return playwright_factory()
 
 
 TRANSCRIPT_LINE_PATTERN = re.compile(
@@ -385,6 +398,8 @@ def _extract_complete_speed_json(text, video_duration, excluded_text=""):
 
 
 def _rendered_response_texts(page):
+    from playwright.sync_api import Error as PlaywrightError
+
     texts = []
     selectors = (
         "pre code.language-json",
@@ -412,6 +427,8 @@ def _rendered_response_texts(page):
 
 
 def _video_edit_response_is_streaming(page):
+    from playwright.sync_api import Error as PlaywrightError
+
     if chatgpt_browser._is_response_generating(page):
         return True
     for selector in (
@@ -429,6 +446,8 @@ def _video_edit_response_is_streaming(page):
 
 
 def _send_speed_prompt(page, prompt, video_duration):
+    from playwright.sync_api import Error as PlaywrightError, TimeoutError
+
     baseline_texts = _rendered_response_texts(page)
     baseline_text = "\n".join(baseline_texts)
     chat_input = chatgpt_browser.find_chat_input(page)
@@ -618,6 +637,8 @@ def probe_duration(ffmpeg_path, media_path):
 
 
 def transcribe_audio(audio_path):
+    from .gemini import browser as gemini_browser
+
     with sync_playwright() as playwright:
         args = ["--disable-blink-features=AutomationControlled"]
         if config.PLAYWRIGHT_CHROME_PROFILE:
@@ -658,6 +679,8 @@ def _run_ffmpeg_with_progress(
     phase,
     progress_start,
     progress_end,
+    cancel_event=None,
+    progress_callback=None,
 ):
     progress_command = [
         *command[:-1],
@@ -681,6 +704,8 @@ def _run_ffmpeg_with_progress(
 
     try:
         for line in process.stdout:
+            if cancel_event is not None and cancel_event.is_set():
+                raise ProcessingCancelled("Video processing was canceled.")
             key, separator, value = line.rstrip().partition("=")
             if not separator:
                 if line.strip():
@@ -713,12 +738,16 @@ def _run_ffmpeg_with_progress(
                             f"{progress_data.get('speed', 'speed unavailable')})"
                         )
                         _report_video_edit_progress(percent, detail)
+                        if progress_callback is not None:
+                            progress_callback(percent, detail)
                         last_percent = percent
             if value == "end":
                 _report_video_edit_progress(
                     progress_end,
                     f"{phase}: complete",
                 )
+                if progress_callback is not None:
+                    progress_callback(progress_end, f"{phase}: complete")
             progress_data.clear()
 
         return_code = process.wait()
@@ -742,6 +771,10 @@ def _run_ffmpeg_with_progress(
             f"FFmpeg {phase.lower()} failed: "
             f"{'; '.join(error_lines) or return_code}"
         )
+
+
+class ProcessingCancelled(RuntimeError):
+    pass
 
 
 def _audio_cache_path(audio_path, cache_dir):
@@ -811,6 +844,8 @@ def render_video(
     scene_plan,
     ffmpeg_path,
     audio_duration,
+    cancel_event=None,
+    progress_callback=None,
 ):
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -865,6 +900,8 @@ def render_video(
             "Retiming source video",
             40,
             65,
+            cancel_event=cancel_event,
+            progress_callback=progress_callback,
         )
         if not intermediate_path.is_file() or intermediate_path.stat().st_size == 0:
             raise RuntimeError("FFmpeg did not create the retimed intermediate video")
@@ -928,12 +965,16 @@ def render_video(
             "Final video and audio render",
             70,
             98,
+            cancel_event=cancel_event,
+            progress_callback=progress_callback,
         )
         if (
             not output_temporary_path.is_file()
             or output_temporary_path.stat().st_size == 0
         ):
             raise RuntimeError("FFmpeg did not create the synchronized video")
+        if cancel_event is not None and cancel_event.is_set():
+            raise ProcessingCancelled("Video processing was canceled.")
         output_temporary_path.replace(output_path)
     finally:
         for temporary_path in (intermediate_path, output_temporary_path):

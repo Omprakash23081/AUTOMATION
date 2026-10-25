@@ -9,13 +9,15 @@ Deploy in this order: create the Netlify site and note its hostname; configure a
 ## 1. Configure the Render API
 
 1. Create a Render Blueprint from this repository and review `render.yaml`. The Blueprint builds the existing Dockerfile, starts the root `server:app` compatibility entry point under the checked-in one-process Gunicorn configuration, and mounts a persistent disk at `/var/data`.
-2. After creating the Netlify site, set Render's `CUTROOM_ALLOWED_HOSTS` to the exact Render API hostname and the exact Netlify site hostname, comma-separated, for example `cutroom-api.onrender.com,my-cutroom.netlify.app`. Add any custom hostnames actually used. Do not include schemes, paths, or wildcard entries.
+2. After creating the Netlify site, set Render's `CUTROOM_ALLOWED_HOSTS` to the exact Netlify site hostname, for example `cutroom7.netlify.app`. The backend automatically adds Render's documented `RENDER_EXTERNAL_HOSTNAME` to the allowlist. Add any custom hostnames actually used, without schemes or paths; do not use wildcards.
 3. In Render's environment settings, set:
 
    | Variable | Required value / notes |
    |---|---|
    | `CUTROOM_PUBLIC_DEPLOYMENT` | `true` (explicitly opts into public access; local-only defaults otherwise remain active) |
-   | `CUTROOM_ALLOWED_HOSTS` | Exact Render API and Netlify hostnames, e.g. `cutroom-api.onrender.com,my-cutroom.netlify.app`, without scheme or path |
+   | `CUTROOM_ALLOWED_HOSTS` | Exact Netlify and any custom hostnames, e.g. `cutroom7.netlify.app`; Render's own hostname is added automatically |
+   | `DATABASE_URL` | Managed PostgreSQL connection URL; required for local-agent metadata endpoints. Keep it only in Render secrets. |
+   | `CUTROOM_AGENT_TESTER_EMAILS` | Comma-separated exact email addresses for the 3–4 private testers allowed to pair agents and submit local-agent jobs. Required to approve agents in public mode. |
    | `CUTROOM_ALLOWED_ORIGINS` | Exact Netlify browser origin, e.g. `https://my-cutroom.netlify.app`, comma-separated; no paths or trailing slash. Include only production origins you trust. |
    | `CUTROOM_DATA` | `/var/data` (the mounted persistent disk) |
    | `CUTROOM_MODE` | `combined`; API and the existing in-process processing/export loops run in this one service process |
@@ -64,3 +66,66 @@ Do not set wildcard origins, disable CSRF, expose secrets in Netlify variables, 
 - Test a small resumable upload, a short job, a rendered preview/download, and a restart/redeploy. Expect active work to stop during restarts; verify that completed artifacts remain under the mounted disk.
 - Test YouTube OAuth only after registering the exact Netlify proxy callback URI. Verify the final redirect returns to the configured frontend origin.
 - Do not interpret a successful health check as proof that long media jobs, large uploads, Netlify proxy timeouts, or persistent-disk capacity are production-ready.
+
+## 6. Local-agent migration status
+
+The local-agent migration is **in progress, not complete**. The backend has PostgreSQL-backed storage for agent pairing records and local-agent job metadata when `DATABASE_URL` is configured; local development and tests use a separate SQLite metadata file. The PostgreSQL implementation has not been verified against a live PostgreSQL instance. Existing account authentication, workspaces, OAuth connections, and provider secrets remain in SQLite.
+
+### Private Windows tester setup
+
+1. For a public Render service, keep the persistent disk and configure `DATABASE_URL` to the managed PostgreSQL URL and `CUTROOM_AGENT_TESTER_EMAILS` to the exact tester addresses. The tester allowlist is checked on authenticated dashboard endpoints and agent API requests. Do not put these values in Netlify or browser code.
+2. From the repository root on each authorized Windows computer, install Python 3 with the Windows `py` launcher. The pairing, self-test, and polling client use only the standard library. For local video sync, install the two small runtime dependencies used by the existing FFmpeg renderer:
+
+   ```powershell
+   py -3 -m pip install imageio-ffmpeg python-dotenv
+   ```
+
+   Playwright browsers and AI credentials are not needed for this basic local render. Then pair the computer:
+
+   ```powershell
+   .\start_local_agent.bat pair --api-url https://cutroom7.netlify.app --name "Om's Windows PC"
+   ```
+
+   Use the Netlify site origin so agent traffic follows the existing same-origin `/api/*` proxy to Render. The agent prints a 16-character, five-minute pairing code. In Cutroom, sign in with the approved tester account, open **Account settings**, enter the code under **Windows local agent**, and select **Pair computer**. The account API call uses the existing session cookie and CSRF protection.
+3. After the CLI confirms pairing, start the agent with:
+
+   ```powershell
+   .\start_local_agent.bat run --api-url https://cutroom7.netlify.app
+   ```
+
+   The bearer token is stored only in `%LOCALAPPDATA%\Cutroom\agent-token.dpapi`, protected with Windows DPAPI for the current Windows user. The agent makes outbound HTTPS requests only; it does not expose a local HTTP listener. Restarting the command reuses the protected credential.
+4. In **Account settings**, queue **Harmless agent test**. The agent claims the job with its bearer token, runs a fixed local self-test (no download, browser, file access, or shell command), and reports `Succeeded`. The account settings job list displays the state. Revoke a computer from the same panel if needed.
+5. Stop the agent with Ctrl+C. If it reports that credentials were rejected or revoked, the stored token is deleted; pair that computer again. Temporary network failures are retried. A running job is heartbeat-leased; if the agent stops unexpectedly, the job becomes retryable after the 90-second lease expires and counts against its three-attempt limit.
+
+## Local video-to-narration sync
+
+Use two PowerShell windows from the repository root. Keep the paired agent running in the first window:
+
+```powershell
+.\start_local_agent.bat run --api-url https://cutroom7.netlify.app
+```
+
+In the second window, open the Windows file pickers and queue one local render:
+
+```powershell
+.\start_local_agent.bat process-video --api-url https://cutroom7.netlify.app
+```
+
+Select a source video, narration audio, and an existing local output folder. The selected media and export stay on that Windows computer. The agent keeps paths in its local `%LOCALAPPDATA%\Cutroom\agent-files.sqlite3`; the backend receives only opaque references bound to the submitting paired agent. The export is an MP4 rendered with the existing `youtube_automation.video_edit.render_video` FFmpeg renderer, using a uniform duration fit of the full source video to the narration. The account settings job list shows progress, safe failure details, and the local output path; queued or running jobs can be canceled there.
+
+This is intentionally the first/basic workflow, not semantic scene matching: it does not use Gemini transcription or ChatGPT speed recommendations. The existing `video_edit.process_video()` workflow still requires its Playwright browser integrations and has not been moved to the agent. FFmpeg runs only from the local application code; a job cannot supply a command or arbitrary path. If a job fails, the agent window contains local diagnostic details; select the files again to submit a new job. A disconnected job can be reclaimed by the same paired agent after its lease expires.
+
+To run the focused local checks from the repository root:
+
+```powershell
+py -3 -m unittest discover -s tests -p "test_local_agent.py"
+py -3 -m unittest discover -s tests -p "test_local_video.py"
+py -3 -m unittest discover -s tests -p "test_agent_store.py"
+py -3 -m unittest discover -s tests -p "test_automation_integration.py"
+```
+
+The Flask-backed pairing, isolation, revocation, and end-to-end self-test cases are in `tests/test_server.py`; run `py -3 -m unittest discover -s tests -p "test_server.py"` to execute that integration suite.
+
+The agent supports only its fixed `agent_self_test` and `video_sync` job types; it rejects unknown job types rather than treating payload data as a command. The backend does not receive media bytes or local input paths. Browser-based media upload, automatic downloading/transcription, semantic scene matching, and Playwright workflows are not part of this local-agent slice.
+
+Do not remove the existing Render disk or move the service to ephemeral/free storage yet. The remaining SQLite-backed account and OAuth data still needs a verified, non-destructive PostgreSQL migration before that would be safe. No SQLite database, media, or user data is automatically copied or deleted by this incremental change.

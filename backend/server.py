@@ -32,6 +32,7 @@ from cryptography.fernet import Fernet, InvalidToken
 from werkzeug.middleware.proxy_fix import ProxyFix
 from werkzeug.security import check_password_hash, generate_password_hash
 
+from backend.agent_store import AgentStore
 from backend.local_config import load_local_secrets
 
 load_local_secrets()
@@ -48,6 +49,7 @@ ASSETS = DATA / "assets"
 DB = DATA / "cutroom.sqlite3"
 for folder in (UPLOADS, EXPORTS, THUMBNAILS, ASSETS):
     folder.mkdir(parents=True, exist_ok=True)
+agent_store = AgentStore(sqlite_path=DATA / "agent-control.sqlite3")
 
 app = Flask(__name__, static_folder=None)
 app.secret_key=os.environ.get("SESSION_SECRET") or secrets.token_urlsafe(48)
@@ -62,6 +64,20 @@ app.config.update(SESSION_COOKIE_HTTPONLY=True,SESSION_COOKIE_SAMESITE=SESSION_C
 if PUBLIC_DEPLOYMENT:
     # Render terminates TLS at its trusted reverse proxy. Honor only one proxy hop.
     app.wsgi_app=ProxyFix(app.wsgi_app,x_for=1,x_proto=1,x_host=1)
+
+
+def public_allowed_hosts() -> set[str]:
+    hosts = {
+        value.strip().lower().rstrip(".")
+        for value in os.environ.get("CUTROOM_ALLOWED_HOSTS", "").split(",")
+        if value.strip()
+    }
+    render_hostname = os.environ.get("RENDER_EXTERNAL_HOSTNAME", "").strip().lower().rstrip(".")
+    if render_hostname:
+        hosts.add(render_hostname)
+    return hosts
+
+
 app.config["MAX_CONTENT_LENGTH"] = int(os.environ.get("CUTROOM_MAX_UPLOAD_BYTES", 4 * 1024**3))
 APP_MODE=os.environ.get("CUTROOM_MODE","combined").strip().lower()
 if APP_MODE not in {"combined","api","worker"}:raise RuntimeError("CUTROOM_MODE must be combined, api, or worker.")
@@ -76,7 +92,7 @@ if PUBLIC_DEPLOYMENT:
         Fernet(encryption_key.encode("utf-8"))
     except Exception:
         raise RuntimeError("A valid CUTROOM_SECRET_ENCRYPTION_KEY is required in public deployment mode.") from None
-    public_hosts={value.strip() for value in os.environ.get("CUTROOM_ALLOWED_HOSTS","").split(",") if value.strip()}
+    public_hosts=public_allowed_hosts()
     public_origins=[value.strip().rstrip("/").lower() for value in os.environ.get("CUTROOM_ALLOWED_ORIGINS","").split(",") if value.strip()]
     if not public_hosts or not public_origins or "*" in public_hosts or "*" in public_origins:
         raise RuntimeError("Set exact CUTROOM_ALLOWED_HOSTS and CUTROOM_ALLOWED_ORIGINS before enabling public deployment.")
@@ -619,7 +635,11 @@ def account_action_url(parameter,token):
 
 @app.before_request
 def local_only():
-    allowed_hosts={value.strip().lower() for value in os.environ.get("CUTROOM_ALLOWED_HOSTS", "127.0.0.1,localhost,[::1]").split(",") if value.strip()}
+    allowed_hosts=public_allowed_hosts() if PUBLIC_DEPLOYMENT else {
+        value.strip().lower()
+        for value in os.environ.get("CUTROOM_ALLOWED_HOSTS", "127.0.0.1,localhost,[::1]").split(",")
+        if value.strip()
+    }
     hostname=request.host.rsplit(":",1)[0].lower() if request.host.count(":")==1 else request.host.lower()
     if PUBLIC_DEPLOYMENT:
         if hostname not in allowed_hosts:
@@ -688,6 +708,8 @@ AUTH_RATE_LIMITS={
     "/api/auth/verification/resend":(3,3600,("ip","email")),
     "/api/auth/password/forgot":(3,3600,("ip","email")),
     "/api/auth/password/reset":(10,900,("ip",)),
+    "/api/agent/pair/start":(10,3600,("ip",)),
+    "/api/agents/pair/approve":(8,900,("ip",)),
 }
 
 
@@ -735,8 +757,8 @@ def is_trusted_client(remote_addr, trusted_cidrs=None):
 @app.before_request
 def require_login():
     if request.method=="OPTIONS":return
-    open_routes={"/api/health","/api/csrf","/api/auth/me","/api/auth/register","/api/auth/login","/api/auth/logout","/api/auth/verify-email","/api/auth/verification/resend","/api/auth/password/forgot","/api/auth/password/reset"}
-    if not request.path.startswith("/api/") or request.path in open_routes:return
+    open_routes={"/api/health","/api/csrf","/api/auth/me","/api/auth/register","/api/auth/login","/api/auth/logout","/api/auth/verify-email","/api/auth/verification/resend","/api/auth/password/forgot","/api/auth/password/reset","/api/agent/pair/start","/api/agent/pair/status"}
+    if not request.path.startswith("/api/") or request.path in open_routes or request.path.startswith("/api/agent/runtime/"):return
     uid=session.get("user_id");wid=session.get("workspace_id")
     if not uid or not wid:return jsonify(error="Sign in to continue.",auth_required=True),401
     with db() as con:
@@ -1623,6 +1645,381 @@ def health():
                ai_configured=openai_configured or gemini_configured or groq_configured,
                openai_configured=openai_configured,gemini_configured=gemini_configured,
                groq_configured=groq_configured,max_upload_bytes=app.config["MAX_CONTENT_LENGTH"])
+
+
+def agent_metadata_available():
+    if PUBLIC_DEPLOYMENT and not agent_store._postgres:
+        return jsonify(error="Set DATABASE_URL to the managed PostgreSQL connection string to enable local agents."),503
+    return None
+
+
+def agent_token_digest(token):
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def local_agent_tester_error(user_id):
+    if not PUBLIC_DEPLOYMENT:
+        return None
+    approved_emails={
+        value.strip().lower()
+        for value in os.environ.get("CUTROOM_AGENT_TESTER_EMAILS","").split(",")
+        if value.strip()
+    }
+    if not approved_emails:
+        return jsonify(error="Configure CUTROOM_AGENT_TESTER_EMAILS before enabling private local agents."),503
+    with db() as con:
+        account=con.execute("SELECT email FROM users WHERE id=?",(user_id,)).fetchone()
+    if not account or account["email"].lower() not in approved_emails:
+        return jsonify(error="Local-agent access is limited to the approved private testers."),403
+    return None
+
+
+def request_agent():
+    authorization=request.headers.get("Authorization","")
+    scheme,_,token=authorization.partition(" ")
+    if scheme.lower()!="bearer" or not token or len(token)>256:
+        return None
+    agent=agent_store.agent_for_token(agent_token_digest(token))
+    if not agent or agent["status"]!="Active":
+        return None
+    if local_agent_tester_error(agent["user_id"]):
+        return None
+    return agent
+
+
+@app.post("/api/agent/pair/start")
+def start_agent_pairing():
+    unavailable=agent_metadata_available()
+    if unavailable:return unavailable
+    data=request.get_json(silent=True)
+    if not isinstance(data,dict):
+        return jsonify(error="Provide the local agent pairing request."),400
+    token=str(data.get("token") or "")
+    name=str(data.get("name") or "").strip()
+    if len(token)<40 or len(token)>256 or not name or len(name)>80:
+        return jsonify(error="The local agent token or name is invalid."),400
+    stamp=datetime.now(timezone.utc)
+    pair_code=secrets.token_hex(8).upper()
+    try:
+        agent_store.create_pair({
+            "id":uuid.uuid4().hex,
+            "pair_code_hash":hashlib.sha256(pair_code.encode("ascii")).hexdigest(),
+            "token_hash":agent_token_digest(token),
+            "name":name,
+            "created_at":stamp.isoformat(),
+            "expires_at":(stamp+timedelta(minutes=5)).isoformat(),
+        })
+    except RuntimeError as exc:
+        return jsonify(error=str(exc)),409
+    return jsonify(pairCode=pair_code,expiresAt=(stamp+timedelta(minutes=5)).isoformat()),201
+
+
+@app.get("/api/agent/pair/status")
+def agent_pair_status():
+    unavailable=agent_metadata_available()
+    if unavailable:return unavailable
+    authorization=request.headers.get("Authorization","")
+    scheme,_,token=authorization.partition(" ")
+    if scheme.lower()!="bearer" or not token or len(token)>256:
+        return jsonify(error="Agent authorization is required."),401
+    digest=agent_token_digest(token)
+    agent=agent_store.agent_for_token(digest)
+    if agent and agent["status"]=="Active":
+        agent_store.heartbeat(agent["id"],datetime.now(timezone.utc).isoformat())
+        return jsonify(status="Paired",agentId=agent["id"],name=agent["name"])
+    if agent and agent["status"]=="Revoked":
+        return jsonify(status="Revoked"),410
+    pair=agent_store.pair_for_token(digest)
+    if not pair:
+        return jsonify(error="This pairing request is not valid."),401
+    if pair["expires_at"]<=datetime.now(timezone.utc).isoformat():
+        return jsonify(status="Expired"),410
+    return jsonify(status=pair["status"])
+
+
+@app.post("/api/agents/pair/approve")
+def approve_agent_pairing():
+    unavailable=agent_metadata_available()
+    if unavailable:return unavailable
+    tester_error=local_agent_tester_error(session["user_id"])
+    if tester_error:return tester_error
+    data=request.get_json(silent=True)
+    if not isinstance(data,dict):
+        return jsonify(error="Provide the local-agent pairing code."),400
+    code=str(data.get("pairCode") or "").strip().upper()
+    if not re.fullmatch(r"[0-9A-F]{16}",code):
+        return jsonify(error="Enter the 16-character pairing code shown by the local agent."),400
+    stamp=datetime.now(timezone.utc).isoformat()
+    try:
+        pair=agent_store.approve_pair(
+            hashlib.sha256(code.encode("ascii")).hexdigest(),
+            session["user_id"],
+            session["workspace_id"],
+            uuid.uuid4().hex,
+            stamp,
+        )
+    except RuntimeError as exc:
+        return jsonify(error=str(exc)),409
+    if not pair:
+        return jsonify(error="That pairing code is invalid, expired, or already used."),404
+    return jsonify(agent={"id":pair["agent_id"],"name":pair["name"],"status":"Active"}),201
+
+
+@app.get("/api/agents")
+def list_local_agents():
+    unavailable=agent_metadata_available()
+    if unavailable:return unavailable
+    tester_error=local_agent_tester_error(session["user_id"])
+    if tester_error:return tester_error
+    stamp=datetime.now(timezone.utc)
+    agents=agent_store.list_agents(session["user_id"],session["workspace_id"])
+    return jsonify(agents=[
+        {
+            "id":agent["id"],
+            "name":agent["name"],
+            "status":agent["status"],
+            "online":bool(agent["last_seen_at"] and (stamp-datetime.fromisoformat(agent["last_seen_at"])).total_seconds()<90),
+            "lastSeenAt":agent["last_seen_at"],
+        }
+        for agent in agents
+    ])
+
+
+@app.delete("/api/agents/<agent_id>")
+def revoke_local_agent(agent_id):
+    unavailable=agent_metadata_available()
+    if unavailable:return unavailable
+    tester_error=local_agent_tester_error(session["user_id"])
+    if tester_error:return tester_error
+    if not agent_store.revoke_agent(
+        agent_id,session["user_id"],session["workspace_id"],datetime.now(timezone.utc).isoformat()
+    ):
+        return jsonify(error="Local agent not found or already revoked."),404
+    return jsonify(ok=True)
+
+
+@app.route("/api/agent/jobs",methods=["GET","POST"])
+def local_agent_jobs():
+    unavailable=agent_metadata_available()
+    if unavailable:return unavailable
+    tester_error=local_agent_tester_error(session["user_id"])
+    if tester_error:return tester_error
+    if request.method=="GET":
+        return jsonify(jobs=agent_store.list_jobs(session["user_id"],session["workspace_id"]))
+    data=request.get_json(silent=True)
+    if isinstance(data,dict) and data.get("jobType")=="agent_self_test":
+        if set(data)-{"jobType","message"}:
+            return jsonify(error="The self-test job contains unsupported fields."),400
+        message=data.get("message","")
+        if not isinstance(message,str) or len(message)>200:
+            return jsonify(error="The self-test message must be text of at most 200 characters."),400
+        payload={"jobType":"agent_self_test","message":message.strip()}
+        stamp=datetime.now(timezone.utc).isoformat()
+        job_id=uuid.uuid4().hex
+        agent_store.create_job({
+            "id":job_id,
+            "user_id":session["user_id"],
+            "workspace_id":session["workspace_id"],
+            "payload_json":json.dumps(payload,separators=(",",":")),
+            "created_at":stamp,
+        })
+        return jsonify(job={"id":job_id,"status":"Queued","stage":"Queued","progress":0,"createdAt":stamp}),201
+    allowed={"sourceType","sourceUrl","sourceName","instructions","maxDuration","clipCount","platform","aspectRatio","language"}
+    if not isinstance(data,dict) or set(data)-allowed:
+        return jsonify(error="The job contains unsupported fields."),400
+    source_type=str(data.get("sourceType") or "")
+    source_url=str(data.get("sourceUrl") or "").strip()
+    if source_type not in {"youtube","upload"}:
+        return jsonify(error="Choose a YouTube link or a local upload."),400
+    if source_type=="youtube":
+        try:
+            youtube_video_id(source_url)
+        except RuntimeError:
+            return jsonify(error="Enter a valid YouTube video URL."),400
+    source_name=data.get("sourceName") or ""
+    instructions=data.get("instructions") or ""
+    if not isinstance(source_name,str) or not isinstance(instructions,str):
+        return jsonify(error="Source name and instructions must be text."),400
+    source_name=source_name.strip()
+    instructions=instructions.strip()
+    try:
+        duration_value=data.get("maxDuration",60)
+        count_value=data.get("clipCount",8)
+        if isinstance(duration_value,bool) or isinstance(count_value,bool):
+            raise ValueError
+        if not float(duration_value).is_integer() or not float(count_value).is_integer():
+            raise ValueError
+        max_duration=int(duration_value)
+        clip_count=int(count_value)
+    except (TypeError,ValueError):
+        return jsonify(error="Duration and clip count must be whole numbers."),400
+    if not 5<=max_duration<=180 or not 1<=clip_count<=20 or len(source_name)>120 or len(instructions)>2000:
+        return jsonify(error="The job options exceed the supported limits."),400
+    platform=data.get("platform","youtube_shorts")
+    aspect_ratio=data.get("aspectRatio","9:16")
+    language_value=data.get("language","auto")
+    if not isinstance(platform,str) or platform not in {"youtube_shorts","instagram_reels","tiktok","linkedin","general"}:
+        return jsonify(error="Choose a supported target platform."),400
+    if not isinstance(aspect_ratio,str) or aspect_ratio not in {"9:16","1:1","16:9"}:
+        return jsonify(error="Aspect ratio must be 9:16, 1:1, or 16:9."),400
+    if not isinstance(language_value,str):
+        return jsonify(error="Language must be 'auto' or a two-letter ISO language code."),400
+    language=language_value.strip().lower()
+    if language!="auto" and (len(language)!=2 or not language.isalpha()):
+        return jsonify(error="Language must be 'auto' or a two-letter ISO language code."),400
+    payload={
+        "sourceType":source_type,
+        "sourceUrl":source_url if source_type=="youtube" else "",
+        "sourceName":source_name,
+        "instructions":instructions,
+        "maxDuration":max_duration,
+        "clipCount":clip_count,
+        "platform":platform,
+        "aspectRatio":aspect_ratio,
+        "language":language,
+    }
+    stamp=datetime.now(timezone.utc).isoformat()
+    job_id=uuid.uuid4().hex
+    agent_store.create_job({
+        "id":job_id,
+        "user_id":session["user_id"],
+        "workspace_id":session["workspace_id"],
+        "payload_json":json.dumps(payload,separators=(",",":")),
+        "created_at":stamp,
+    })
+    return jsonify(job={"id":job_id,"status":"Queued","stage":"Queued","progress":0,"createdAt":stamp}),201
+
+
+@app.get("/api/agent/jobs/<job_id>")
+def get_local_agent_job(job_id):
+    unavailable=agent_metadata_available()
+    if unavailable:return unavailable
+    tester_error=local_agent_tester_error(session["user_id"])
+    if tester_error:return tester_error
+    job=agent_store.get_job(job_id,session["user_id"],session["workspace_id"])
+    if not job:return jsonify(error="Local-agent job not found."),404
+    return jsonify(job=job)
+
+
+@app.post("/api/agent/jobs/<job_id>/cancel")
+def cancel_local_agent_job(job_id):
+    unavailable=agent_metadata_available()
+    if unavailable:return unavailable
+    tester_error=local_agent_tester_error(session["user_id"])
+    if tester_error:return tester_error
+    status=agent_store.cancel_job(
+        job_id,session["user_id"],session["workspace_id"],datetime.now(timezone.utc).isoformat()
+    )
+    if status is None:return jsonify(error="Local-agent job not found."),404
+    return jsonify(status=status)
+
+
+@app.post("/api/agent/runtime/heartbeat")
+def local_agent_heartbeat():
+    unavailable=agent_metadata_available()
+    if unavailable:return unavailable
+    agent=request_agent()
+    if not agent:return jsonify(error="Local-agent authorization failed."),401
+    data=request.get_json(silent=True) or {}
+    job_id=data.get("jobId")
+    if job_id is not None and (not isinstance(job_id,str) or len(job_id)>64):
+        return jsonify(error="Invalid job identifier."),400
+    cancel_requested=agent_store.heartbeat_job(
+        job_id,agent["id"],datetime.now(timezone.utc).isoformat()
+    )
+    return jsonify(ok=True,cancelRequested=cancel_requested)
+
+
+@app.post("/api/agent/runtime/jobs/claim")
+def claim_local_agent_job():
+    unavailable=agent_metadata_available()
+    if unavailable:return unavailable
+    agent=request_agent()
+    if not agent:return jsonify(error="Local-agent authorization failed."),401
+    stamp=datetime.now(timezone.utc)
+    agent_store.heartbeat(agent["id"],stamp.isoformat())
+    job=agent_store.claim_job(
+        agent,stamp.isoformat(),(stamp-timedelta(seconds=90)).isoformat()
+    )
+    if not job:return jsonify(job=None)
+    return jsonify(job={
+        "id":job["id"],
+        "payload":json.loads(job["payload_json"]),
+        "attempt":job["attempts"],
+        "maxAttempts":job["max_attempts"],
+    })
+
+
+@app.post("/api/agent/runtime/jobs")
+def submit_local_agent_job():
+    unavailable=agent_metadata_available()
+    if unavailable:return unavailable
+    agent=request_agent()
+    if not agent:return jsonify(error="Local-agent authorization failed."),401
+    data=request.get_json(silent=True)
+    allowed={"jobType","videoRef","audioRef","outputRef"}
+    if not isinstance(data,dict) or set(data)!=allowed or data.get("jobType")!="video_sync":
+        return jsonify(error="Only validated local video-sync jobs can be submitted by an agent."),400
+    for key in ("videoRef","audioRef","outputRef"):
+        if not isinstance(data[key],str) or not re.fullmatch(r"[0-9a-f]{32}",data[key]):
+            return jsonify(error="Local video file references must be opaque identifiers."),400
+    payload={key:data[key] for key in allowed}
+    stamp=datetime.now(timezone.utc).isoformat()
+    job_id=uuid.uuid4().hex
+    agent_store.create_job({
+        "id":job_id,
+        "user_id":agent["user_id"],
+        "workspace_id":agent["workspace_id"],
+        "agent_id":agent["id"],
+        "pin_to_agent":True,
+        "payload_json":json.dumps(payload,separators=(",",":")),
+        "created_at":stamp,
+    })
+    return jsonify(job={"id":job_id,"status":"Queued","stage":"Queued","progress":0,"createdAt":stamp}),201
+
+
+@app.post("/api/agent/runtime/jobs/<job_id>/status")
+def update_local_agent_job(job_id):
+    unavailable=agent_metadata_available()
+    if unavailable:return unavailable
+    agent=request_agent()
+    if not agent:return jsonify(error="Local-agent authorization failed."),401
+    data=request.get_json(silent=True)
+    allowed={"status","stage","progress","error","outputLocation"}
+    if not isinstance(data,dict) or set(data)-allowed:
+        return jsonify(error="The job update contains unsupported fields."),400
+    status=data.get("status","Running")
+    if status not in {"Running","Succeeded","Failed","Canceled"}:
+        return jsonify(error="Invalid local-agent job status."),400
+    try:
+        progress=int(data.get("progress",0))
+    except (TypeError,ValueError):
+        return jsonify(error="Job progress must be a whole number."),400
+    stage=str(data.get("stage") or status)[:100]
+    if not 0<=progress<=100:
+        return jsonify(error="Job progress must be between 0 and 100."),400
+    if status=="Canceled":
+        if not agent_store.complete_canceled_job(job_id,agent["id"],datetime.now(timezone.utc).isoformat()):
+            return jsonify(error="Cancellation was not requested for this active job."),409
+        return jsonify(ok=True)
+    values={"status":status,"stage":stage,"progress":100 if status=="Succeeded" else progress}
+    error=data.get("error")
+    output_location=data.get("outputLocation")
+    if error is not None:
+        if not isinstance(error,str):return jsonify(error="Job error must be text."),400
+        values["error"]=error[:1000]
+    if output_location is not None:
+        if not isinstance(output_location,str) or len(output_location)>1024:
+            return jsonify(error="Output location is invalid."),400
+        values["output_location"]=output_location
+    if status in {"Succeeded","Failed","Canceled"}:
+        values["finished_at"]=datetime.now(timezone.utc).isoformat()
+    updated=agent_store.update_job(
+        job_id,agent["id"],values,datetime.now(timezone.utc).isoformat()
+    )
+    if not updated:
+        return jsonify(error="Job is not active for this agent or cancellation was requested."),409
+    return jsonify(ok=True)
 
 
 @app.get("/api/youtube/connect")
