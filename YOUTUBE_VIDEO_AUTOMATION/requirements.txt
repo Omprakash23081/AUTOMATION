@@ -2,7 +2,7 @@ requests
 python-dotenv
 cartesia
 playwright
-yt-dlp[default]
+yt-dlp[default]>=2026.10.21
 imageio-ffmpeg
 faster-whisper
 youtube-transcript-api

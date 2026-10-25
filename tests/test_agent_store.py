@@ -158,9 +158,9 @@ class AgentStoreTests(unittest.TestCase):
         self.assertEqual(recovered["id"], "job-single-claim")
         self.assertEqual(recovered["attempts"], 2)
 
-    def test_private_tester_agent_limit_is_four(self):
+    def test_private_tester_agent_limit_is_five(self):
         with self.store.connection() as con:
-            for index in range(2, 5):
+            for index in range(2, 6):
                 con.execute(
                     "INSERT INTO local_agents(id,user_id,workspace_id,name,token_hash,status,created_at) "
                     "VALUES(?,?,?,?,?,'Active',?)",
@@ -173,7 +173,7 @@ class AgentStoreTests(unittest.TestCase):
             "id": "pair-over-cap",
             "pair_code_hash": "over-cap-hash",
             "token_hash": "over-cap-token",
-            "name": "Fifth PC",
+            "name": "Sixth PC",
             "created_at": self.timestamp,
             "expires_at": "2026-01-01T00:05:00+00:00",
         })

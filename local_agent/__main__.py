@@ -69,6 +69,11 @@ def main() -> int:
     pair_parser.add_argument("--name", default="Windows local agent", help="Name shown in Cutroom account settings.")
     run_parser = subparsers.add_parser("run", help="Poll Cutroom and execute authorized local jobs.")
     run_parser.add_argument("--api-url", required=True, help="Cutroom API origin, e.g. https://cutroom7.netlify.app")
+    run_parser.add_argument(
+        "--browser",
+        choices=("chrome", "edge", "firefox"),
+        help="Use this local browser profile for YouTube authentication when needed.",
+    )
     video_parser = subparsers.add_parser(
         "process-video",
         help="Select local video/audio files and queue a local video-sync render.",
@@ -89,7 +94,7 @@ def main() -> int:
         if args.command == "process-video":
             return _submit_video_job(api, LocalFileReferences())
         print("Cutroom agent is running. Press Ctrl+C to stop.")
-        AgentRunner(api).run_forever()
+        AgentRunner(api, youtube_browser=getattr(args, "browser", None)).run_forever()
     except (AgentApiError, OSError, RuntimeError, TimeoutError, ValueError) as exc:
         if "credentials were rejected or revoked" in str(exc).lower():
             credentials.delete()

@@ -17,6 +17,7 @@ from types import SimpleNamespace
 from pathlib import Path
 from flask.testing import FlaskClient
 from unittest.mock import MagicMock, Mock, patch
+from yt_dlp.utils import DownloadError
 from backend.agent_store import AgentStore
 from local_agent.client import AgentApi
 from local_agent.runner import AgentRunner
@@ -651,6 +652,59 @@ class CutroomWorkflowTests(unittest.TestCase):
         self.assertEqual(options["socket_timeout"],10)
         self.assertEqual(options["retries"],2)
         self.assertEqual(options["fragment_retries"],2)
+
+    def test_youtube_authentication_error_is_nonretryable_and_safe(self):
+        downloader=Mock()
+        downloader.__enter__=Mock(return_value=downloader)
+        downloader.__exit__=Mock(return_value=False)
+        downloader.extract_info.side_effect=DownloadError(
+            "ERROR: [youtube] Sign in to confirm you're not a bot. "
+            "Use --cookies-from-browser or --cookies for authentication."
+        )
+        yt_dlp=SimpleNamespace(
+            YoutubeDL=Mock(return_value=downloader),
+            utils=SimpleNamespace(DownloadError=DownloadError),
+        )
+        with patch.dict(sys.modules,{"yt_dlp":yt_dlp}):
+            with self.assertRaises(server.NonRetryableProcessingError) as raised:
+                server.fetch_youtube(uuid.uuid4().hex,"https://youtu.be/a1B2c3D4e5F")
+        self.assertEqual(downloader.extract_info.call_count,1)
+        self.assertEqual(str(raised.exception),server.YOUTUBE_AUTHENTICATION_REQUIRED)
+        self.assertNotIn("Sign in to confirm",str(raised.exception))
+        self.assertNotIn("--cookies-from-browser",str(raised.exception))
+
+    def test_generate_does_not_retry_authentication_required_download(self):
+        created=self.client.post("/api/projects",json={
+            "sourceType":"youtube",
+            "url":"https://youtu.be/a1B2c3D4e5F",
+            "name":"Authentication retry guard",
+        })
+        self.assertEqual(created.status_code,201,created.json)
+        project_id=created.json["project"]["id"]
+        self.project_ids.append(project_id)
+        job_id=uuid.uuid4().hex
+        stamp=server.now()
+        with server.db() as con:
+            con.execute(
+                "UPDATE projects SET status='Failed',error=? WHERE id=?",
+                (server.YOUTUBE_AUTHENTICATION_REQUIRED,project_id),
+            )
+            con.execute(
+                "INSERT INTO processing_jobs(id,project_id,status,stage,attempts,max_attempts,"
+                "created_at,updated_at,error) VALUES(?,?,?,?,?,?,?,?,?)",
+                (job_id,project_id,"Failed","Failed",1,3,stamp,stamp,server.YOUTUBE_AUTHENTICATION_REQUIRED),
+            )
+
+        retry=self.client.post(f"/api/projects/{project_id}/generate",json={})
+
+        with server.db() as con:
+            job=con.execute(
+                "SELECT status,attempts FROM processing_jobs WHERE id=?",(job_id,)
+            ).fetchone()
+        self.assertEqual(retry.status_code,422,retry.json)
+        self.assertIn("Windows local agent",retry.json["error"])
+        self.assertEqual(job["status"],"Failed")
+        self.assertEqual(job["attempts"],1)
 
     def test_youtube_download_reuses_cached_video_named_by_video_id(self):
         video_id="a1B2c3D4e5F"
@@ -2160,6 +2214,99 @@ class CutroomWorkflowTests(unittest.TestCase):
         self.assertEqual(result.status_code,200,result.json)
         self.assertEqual(result.json["job"]["status"],"Succeeded")
         self.assertEqual(result.json["job"]["stage"],"Self-test passed")
+
+    def test_local_agent_youtube_download_upload_flow(self):
+        token=uuid.uuid4().hex+uuid.uuid4().hex
+        self.agent_token_hashes.append(hashlib.sha256(token.encode()).hexdigest())
+        started=self.client.post(
+            "/api/agent/pair/start",json={"token":token,"name":"YouTube download PC"}
+        )
+        paired=self.client.post(
+            "/api/agents/pair/approve",json={"pairCode":started.json["pairCode"]}
+        )
+        self.assertEqual(paired.status_code,201,paired.json)
+        agent_id=paired.json["agent"]["id"]
+        self.agent_ids.append(agent_id)
+        server.agent_store.heartbeat(agent_id,datetime.now(timezone.utc).isoformat())
+
+        video_id="a1B2c3D4e5F"
+        created=self.client.post("/api/projects",json={
+            "sourceType":"youtube","url":"https://youtu.be/"+video_id,"name":"Local fallback"
+        })
+        self.assertEqual(created.status_code,201,created.json)
+        project_id=created.json["project"]["id"]
+        self.project_ids.append(project_id)
+        with server.db() as con:
+            con.execute(
+                "UPDATE projects SET status='Failed',error=? WHERE id=?",
+                (server.YOUTUBE_AUTHENTICATION_REQUIRED,project_id),
+            )
+        queued=self.client.post(
+            f"/api/projects/{project_id}/local-youtube-download",json={}
+        )
+        self.assertEqual(queued.status_code,202,queued.json)
+        job_id=queued.json["job"]["id"]
+        with server.agent_store.connection() as con:
+            stored_payload=json.loads(con.execute(
+                "SELECT payload_json FROM local_agent_jobs WHERE id=?",(job_id,)
+            ).fetchone()["payload_json"])
+        self.assertEqual(set(stored_payload),{"jobType","projectId","sourceUrl"})
+        self.assertNotIn("cookies",json.dumps(stored_payload).lower())
+        bearer={"Authorization":"Bearer "+token}
+
+        def upload_transport(path,offset,chunk,agent_token):
+            response=server.app.test_client().put(
+                path,
+                query_string={"offset":offset},
+                data=chunk,
+                headers={
+                    "Authorization":"Bearer "+agent_token,
+                    "Content-Type":"application/octet-stream",
+                },
+            )
+            data=response.get_json(silent=True) or {}
+            if response.status_code>=400:
+                from local_agent.client import AgentApiError
+                raise AgentApiError(response.status_code,data.get("error","API error"))
+            return data
+
+        api=AgentApi(
+            "https://cutroom7.netlify.app",
+            token=token,
+            transport=self._agent_flask_transport,
+            upload_transport=upload_transport,
+        )
+
+        def fake_download(url,directory,browser,cancel_event,progress_callback):
+            self.assertEqual(url,"https://youtu.be/"+video_id)
+            self.assertEqual(browser,"edge")
+            source=Path(directory)/"source.mp4"
+            source.write_bytes(self.media.read_bytes())
+            progress_callback(100,"Downloading YouTube source on Windows")
+            return source
+
+        runner=AgentRunner(
+            api,
+            wait=lambda _:None,
+            heartbeat_interval=60,
+            youtube_browser="edge",
+            youtube_downloader=fake_download,
+        )
+        self.assertTrue(runner.process_one())
+        self.assertFalse(runner.process_one())
+
+        result=self.client.get("/api/agent/jobs/"+job_id)
+        project=self.client.get("/api/projects/"+project_id).json["project"]
+        with server.db() as con:
+            source_path=con.execute(
+                "SELECT source_path FROM projects WHERE id=?",(project_id,)
+            ).fetchone()["source_path"]
+        self.assertEqual(result.json["job"]["status"],"Succeeded")
+        self.assertEqual(project["status"],"Ready to process")
+        self.assertEqual(project["source_url"],"https://youtu.be/"+video_id)
+        self.assertTrue(Path(source_path).is_file())
+        self.assertEqual(project["agent_jobs"][0]["project_id"],project_id)
+        self.assertNotIn("cookies",json.dumps(project["agent_jobs"][0]).lower())
 
     def test_agent_video_job_accepts_only_opaque_local_references(self):
         token=uuid.uuid4().hex+uuid.uuid4().hex

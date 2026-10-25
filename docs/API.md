@@ -60,10 +60,11 @@ Each chunk is bounded and streamed to a temporary file; the server persists its 
 | GET | /api/clips?q=... | Workspace-scoped clip library; searches title, hook, transcript and project name; supports `exported=0\|1`, `page` and `perPage` |
 | POST | /api/projects | Create an upload project or YouTube URL project. Optional fields: `maxDuration` (5–180 seconds, default 60), `clipCount` (1–20, default 8), `targetPlatform` (`youtube_shorts`, `instagram_reels`, `tiktok`, `linkedin`, `general`), `aspectRatio` (`9:16`, `1:1`, `16:9`), `language` (`auto` or a two-letter ISO language code), and custom `instructions` |
 | GET | /api/projects/{id} | Project status, source metadata, clip drafts and latest ten processing-job records |
+| POST | /api/projects/{id}/local-youtube-download | Queue an authentication-failed YouTube source download on the user's paired, online Windows agent |
 | POST multipart | /api/projects/{id}/upload | Upload one supported media source; response includes duration, dimensions, frame rate, stream presence, and thumbnail availability |
 | GET | /api/projects/{id}/thumbnail | Workspace-protected JPEG preview generated during source inspection |
 | GET | /api/projects/{id}/source | Preview original source with range support |
-| POST | /api/projects/{id}/generate | Enqueue or explicitly retry processing (up to three attempts per job); returns 202 and jobId |
+| POST | /api/projects/{id}/generate | Enqueue or explicitly retry processing (up to three attempts per job); returns 202 and jobId. Authentication-required YouTube failures are not retried; an attached local-agent source can be processed normally |
 | DELETE | /api/processing-jobs/{jobId} | Cancel queued/running processing; active provider requests finish before cancellation is observed |
 | GET | /api/projects/{id}/transcript?q=... | Search or page through persisted segments (`limit` up to 500, `offset`; `includeDeleted=1` includes recoverable removals); each segment returns word timing entries when available, otherwise `words: []` |
 | PATCH | /api/projects/{id}/transcript/{segmentId} | Correct a transcript segment using `baseRevision`; stale edits return 409 |
@@ -86,6 +87,19 @@ If a browser upload is cancelled or fails, the existing upload project remains a
 | GET | /api/calendar?month=YYYY-MM | Return planned drafts for a month |
 
 The calendar is a planning surface only; it does not schedule or publish posts to social platforms.
+
+## Windows local-agent YouTube fallback
+
+The browser uses its authenticated session and CSRF token to queue a fallback only after the project has a recognized YouTube authentication error. The agent must already be paired, approved for local-agent testing, and recently online. The job is pinned to that agent and project; the project detail response includes its local-agent progress. The agent's `--browser` selection is configured only on Windows and is never sent in job payloads.
+
+| Method | Path | Purpose |
+|---|---|---|
+| POST | /api/projects/{id}/local-youtube-download | Queue a YouTube download against the failed project's existing URL |
+| POST | /api/agent/runtime/jobs/{jobId}/upload-sessions | Create a source-upload session for the active, project-bound download job |
+| PUT | /api/agent/runtime/jobs/{jobId}/upload-sessions/{uploadId}/chunk?offset={bytes} | Upload one bounded raw chunk using the paired agent's bearer token |
+| POST | /api/agent/runtime/jobs/{jobId}/upload-sessions/{uploadId}/complete | Validate and attach the source video, preserving the original YouTube URL for captions |
+
+The runtime upload routes require the paired agent's bearer token and verify that the active job, agent, workspace, project, and upload session all match. Browser cookies are read locally by yt-dlp and are not sent in API requests or agent status/error updates. The source video is uploaded to the Render project so the existing server-side processing pipeline can continue; this fallback does not keep the source video exclusively on Windows.
 
 ## Clips and exports
 

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import json
 import sqlite3
 import threading
 from contextlib import contextmanager
@@ -60,7 +61,7 @@ CREATE INDEX IF NOT EXISTS local_agent_jobs_queue_idx
     ON local_agent_jobs(user_id, workspace_id, status, created_at);
 """
 
-MAX_ACTIVE_LOCAL_AGENTS = 4
+MAX_ACTIVE_LOCAL_AGENTS = 5
 
 
 class _Connection:
@@ -272,11 +273,20 @@ class AgentStore:
         with self.connection() as con:
             rows = con.execute(
                 "SELECT id,status,stage,progress,attempts,max_attempts,error,output_location,"
-                "created_at,started_at,finished_at,updated_at FROM local_agent_jobs "
+                "created_at,started_at,finished_at,updated_at,payload_json FROM local_agent_jobs "
                 "WHERE user_id=? AND workspace_id=? ORDER BY created_at DESC,id DESC LIMIT 100",
                 (user_id, workspace_id),
             ).fetchall()
-        return [dict(row) for row in rows]
+        jobs = []
+        for row in rows:
+            job = dict(row)
+            try:
+                payload = json.loads(job.pop("payload_json"))
+            except (TypeError, json.JSONDecodeError):
+                payload = {}
+            job["project_id"] = payload.get("projectId")
+            jobs.append(job)
+        return jobs
 
     def get_job(self, job_id: str, user_id: str, workspace_id: str) -> dict[str, Any] | None:
         self.ensure_schema()
@@ -286,6 +296,16 @@ class AgentStore:
                 "created_at,started_at,finished_at,updated_at FROM local_agent_jobs "
                 "WHERE id=? AND user_id=? AND workspace_id=?",
                 (job_id, user_id, workspace_id),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def runtime_job(self, job_id: str, agent_id: str) -> dict[str, Any] | None:
+        self.ensure_schema()
+        with self.connection() as con:
+            row = con.execute(
+                "SELECT id,user_id,workspace_id,payload_json,status FROM local_agent_jobs "
+                "WHERE id=? AND agent_id=? AND status='Running' AND cancel_requested=0",
+                (job_id, agent_id),
             ).fetchone()
         return dict(row) if row else None
 

@@ -383,6 +383,19 @@ $("#searchInput").addEventListener("input", () => {
 ["projectScope", "projectStatus", "projectSource", "sortOrder"].forEach((id) =>
   $("#" + id).addEventListener("change", () => {
     projectPage = 1;
+    setInterval(() => {
+      const detail = $("#projectDetail");
+      const project = detail?._projectSnapshot;
+      if (
+        $("#projectDialog")?.open &&
+        detail?.dataset.projectId &&
+        project?.agent_jobs?.some((job) =>
+          ["Queued", "Running"].includes(job.status),
+        )
+      ) {
+        refreshProject(detail.dataset.projectId);
+      }
+    }, 3000);
     load();
   }),
 );
@@ -517,6 +530,8 @@ function stageLabel(status) {
       "Inspecting cached source": "Checking saved video",
       "Connecting to YouTube": "Connecting to YouTube",
       "Downloading source": "Downloading source video",
+      "Downloading YouTube source on Windows": "Downloading on your Windows PC",
+      "Uploading source to Cutroom": "Uploading source to Cutroom",
       "Inspecting source": "Checking downloaded video",
       "Reusing downloaded source": "Reusing saved source",
       Transcribing: "Creating transcript with OpenAI Whisper",
@@ -547,6 +562,10 @@ function stageLabel(status) {
 function stageDescription(status) {
   return (
     {
+      "Downloading YouTube source on Windows":
+        "The paired Windows agent is downloading with the selected local browser profile. Browser cookies never leave this computer.",
+      "Uploading source to Cutroom":
+        "The Windows agent is sending the source video in resumable chunks so the existing Cutroom processing workflow can continue.",
       Queued: "Waiting for a processing worker to pick up this job.",
       "Checking saved source":
         "Checking whether this YouTube video is already saved locally; no network download is running.",
@@ -628,7 +647,12 @@ function pipelineSteps(project) {
   )
     activeIndex = 1;
   else if (stage === "Connecting to YouTube") activeIndex = 2;
-  else if (stage === "Downloading source") activeIndex = isYoutube ? 3 : 1;
+  else if (
+    stage === "Downloading source" ||
+    stage === "Downloading YouTube source on Windows" ||
+    stage === "Uploading source to Cutroom"
+  )
+    activeIndex = isYoutube ? 3 : 1;
   else if (
     stage === "Transcribing" ||
     stage === "Reusing transcript" ||
@@ -681,12 +705,30 @@ function projectContentKey(project) {
 function projectProcessingState(project) {
   const jobs = project.jobs || [];
   const latest = jobs[0];
-  const error =
-    project.error || (latest?.status === "Failed" ? latest.error : "");
-  const activeJob = error
-    ? null
-    : jobs.find((job) => job.status === "Queued" || job.status === "Running");
-  const failed = !!error || latest?.status === "Failed";
+  const agentJobs = project.agent_jobs || [];
+  const latestAgentJob = agentJobs[0];
+  const activeAgentJob = agentJobs.find(
+    (job) => job.status === "Queued" || job.status === "Running",
+  );
+  const oldAuthenticationFailure =
+    !!project.source_name &&
+    /YouTube (?:still )?requires authentication/i.test(latest?.error || "");
+  const processingError =
+    project.error ||
+    (latest?.status === "Failed" && !oldAuthenticationFailure
+      ? latest.error
+      : "");
+  const error = activeAgentJob
+    ? ""
+    : latestAgentJob?.status === "Failed"
+      ? latestAgentJob.error
+      : processingError;
+  const activeJob =
+    activeAgentJob ||
+    (!error &&
+      jobs.find((job) => job.status === "Queued" || job.status === "Running"));
+  const failed =
+    !!error || (latest?.status === "Failed" && !oldAuthenticationFailure);
   return {
     activeJob,
     active: !!activeJob,
@@ -712,11 +754,15 @@ function updateProjectStatus(detail, project) {
   const captionsUnavailable =
     !!projectError &&
     /YouTube captions are disabled for this video/i.test(projectError);
+  const authenticationRequired =
+    !!projectError && /YouTube (?:still )?requires authentication/i.test(projectError);
   if (button) {
-    button.disabled = active || captionsUnavailable;
+    button.disabled = active || captionsUnavailable || authenticationRequired;
     button.innerHTML =
       (captionsUnavailable
         ? "Captions unavailable"
+        : authenticationRequired && !project.source_name
+          ? "Use Windows agent below"
         : projectStatus === "Ready"
           ? "Find new clips"
           : projectStatus === "Failed"
@@ -730,7 +776,31 @@ function updateProjectStatus(detail, project) {
       error.className = "error-box";
       detail.querySelector(".detail-header")?.after(error);
     }
-    error.textContent = projectError;
+    error.replaceChildren(document.createTextNode(projectError));
+    if (
+      authenticationRequired &&
+      project.source_type === "youtube" &&
+      !project.source_name
+    ) {
+      const localDownload = document.createElement("button");
+      localDownload.type = "button";
+      localDownload.className = "secondary-button";
+      localDownload.textContent = "Download with paired Windows agent";
+      localDownload.addEventListener("click", async () => {
+        localDownload.disabled = true;
+        try {
+          await api(`/api/projects/${encodeURIComponent(project.id)}/local-youtube-download`, {
+            method: "POST",
+          });
+          toast("Windows-agent download queued. Keep the paired agent running.");
+          await refreshProject(project.id);
+        } catch (requestError) {
+          toast(requestError.message);
+          localDownload.disabled = false;
+        }
+      });
+      error.append(document.createElement("br"), localDownload);
+    }
   } else error?.remove();
   let progress = detail.querySelector(".progress-box");
   if (active && !progress) {
@@ -748,11 +818,15 @@ function updateProjectStatus(detail, project) {
     progress.hidden = !active;
     if (active) {
       const queued = activeJob?.status === "Queued";
+      const localAgentJob = (project.agent_jobs || []).some(
+        (job) => job.id === activeJob?.id,
+      );
       const worker = project.worker || {};
       const queuedAge =
         Date.now() - Date.parse(activeJob?.created_at || Date.now());
       const workerOffline =
         queued &&
+        !localAgentJob &&
         !worker.available &&
         (worker.age_seconds > 20 || queuedAge > 20000);
       const spinner = progress.querySelector(".spinner");
@@ -767,6 +841,8 @@ function updateProjectStatus(detail, project) {
       const queueMessage = queued
         ? workerOffline
           ? "The job is safely queued, but the processing worker has not checked in. Start or restart Cutroom (or the Docker worker) to resume."
+          : localAgentJob
+            ? "Waiting for the paired Windows agent to claim this download."
           : worker.available
             ? "Waiting in the processing queue" +
               (activeJob.queue_position

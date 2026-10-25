@@ -1,12 +1,18 @@
 from __future__ import annotations
 
 import threading
+import tempfile
 import time
+from pathlib import Path
 from typing import Callable
 
 from local_agent.client import AgentApi, AgentApiError
 from local_agent.references import LocalFileReferences
 from local_agent.video_sync import VideoProcessingCancelled, process_video_sync
+from local_agent.youtube_download import (
+    YoutubeDownloadCancelled,
+    download_youtube_source,
+)
 
 
 class AgentStatusUnavailable(ConnectionError):
@@ -21,12 +27,16 @@ class AgentRunner:
         heartbeat_interval: float = 20,
         references: LocalFileReferences | None = None,
         video_processor: Callable | None = None,
+        youtube_browser: str | None = None,
+        youtube_downloader: Callable = download_youtube_source,
     ):
         self.api = api
         self.wait = wait
         self.heartbeat_interval = heartbeat_interval
         self.references = references or LocalFileReferences()
         self.video_processor = video_processor or process_video_sync
+        self.youtube_browser = youtube_browser
+        self.youtube_downloader = youtube_downloader
         self._stop_heartbeat = threading.Event()
         self._cancel_requested = threading.Event()
         self._heartbeat_error: list[BaseException] = []
@@ -165,6 +175,75 @@ class AgentRunner:
                     outputLocation=str(output_path),
                 )
                 self.references.delete_video_job(payload)
+            elif job_type == "youtube_download" and set(payload) == {
+                "jobType", "projectId", "sourceUrl"
+            }:
+                self._required_update(
+                    job_id,
+                    status="Running",
+                    stage="Downloading YouTube source on Windows",
+                    progress=0,
+                )
+                last_progress = {"percent": -1, "time": 0.0}
+
+                def report_youtube_progress(percent: int, stage: str) -> None:
+                    now = time.monotonic()
+                    if (
+                        percent < 100
+                        and percent < last_progress["percent"] + 5
+                        and now - last_progress["time"] < 3
+                    ):
+                        return
+                    last_progress.update(percent=percent, time=now)
+                    try:
+                        self.api.update(
+                            job_id,
+                            status="Running",
+                            stage=stage[:100],
+                            progress=max(0, min(99, int(percent))),
+                        )
+                    except AgentApiError as exc:
+                        if exc.status == 409:
+                            self._cancel_requested.set()
+                        elif exc.status in {401, 403, 410}:
+                            self._heartbeat_error.append(exc)
+                            self._cancel_requested.set()
+                    except (ConnectionError, TimeoutError, OSError):
+                        pass
+
+                with tempfile.TemporaryDirectory(prefix="cutroom_youtube_") as directory:
+                    source_path = self.youtube_downloader(
+                        payload["sourceUrl"],
+                        Path(directory),
+                        self.youtube_browser,
+                        self._cancel_requested,
+                        report_youtube_progress,
+                    )
+                    if self._cancel_requested.is_set():
+                        raise YoutubeDownloadCancelled("The local YouTube download was canceled.")
+                    self._required_update(
+                        job_id,
+                        status="Running",
+                        stage="Uploading source to Cutroom",
+                        progress=0,
+                    )
+                    last_progress.update(percent=-1,time=0.0)
+                    self.api.upload_youtube_source(
+                        job_id,
+                        source_path,
+                        lambda percent: report_youtube_progress(
+                            percent, "Uploading source to Cutroom"
+                        ),
+                    )
+                    if self._cancel_requested.is_set():
+                        raise YoutubeDownloadCancelled("The local YouTube download was canceled.")
+                self._required_update(
+                    job_id,
+                    status="Succeeded",
+                    stage="YouTube source uploaded",
+                    progress=100,
+                    outputLocation="Source attached to the Cutroom project",
+                )
             else:
                 self.api.update(
                     job_id,
@@ -174,7 +253,7 @@ class AgentRunner:
                     error="This agent build does not support the requested job type or payload.",
                 )
         except Exception as exc:
-            if isinstance(exc, VideoProcessingCancelled):
+            if isinstance(exc, (VideoProcessingCancelled, YoutubeDownloadCancelled)):
                 self._required_update(
                     job_id, status="Canceled", stage="Canceled", progress=100
                 )
@@ -204,6 +283,8 @@ class AgentRunner:
                         if isinstance(exc, FileNotFoundError)
                         else "Local video processing failed. Check the agent window for details."
                     )
+                elif job_type == "youtube_download":
+                    message = str(exc)[:1000] or "The local YouTube download failed."
                 else:
                     message = str(exc)[:1000] or exc.__class__.__name__
                 failed = self._report_failure(job_id, message)

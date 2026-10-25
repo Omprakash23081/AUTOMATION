@@ -31,6 +31,7 @@ from openai import OpenAI
 from cryptography.fernet import Fernet, InvalidToken
 from werkzeug.middleware.proxy_fix import ProxyFix
 from werkzeug.security import check_password_hash, generate_password_hash
+from yt_dlp.utils import DownloadError
 
 from backend.agent_store import AgentStore
 from backend.local_config import load_local_secrets
@@ -877,6 +878,24 @@ class ProcessingCancelled(Exception):
 
 class NonRetryableProcessingError(RuntimeError):
     pass
+
+
+YOUTUBE_AUTHENTICATION_REQUIRED = (
+    "YouTube requires authentication for this video. Render cannot use personal "
+    "browser cookies. Use the Windows local agent to download it; cookies stay on "
+    "your computer and are never sent to Render."
+)
+
+
+def youtube_authentication_required(message):
+    text = str(message).lower()
+    return (
+        "sign in to confirm you're not a bot" in text
+        or "use --cookies-from-browser" in text
+        or "use --cookies" in text and "sign in" in text
+        or "youtube requires authentication" in text
+        or "youtube still requires authentication" in text
+    )
 
 
 def check_processing_cancel(job_id):
@@ -1914,6 +1933,49 @@ def cancel_local_agent_job(job_id):
     return jsonify(status=status)
 
 
+@app.post("/api/projects/<pid>/local-youtube-download")
+def queue_local_youtube_download(pid):
+    unavailable=agent_metadata_available()
+    if unavailable:return unavailable
+    tester_error=local_agent_tester_error(session["user_id"])
+    if tester_error:return tester_error
+    project=get_project(pid)
+    if project["source_type"]!="youtube" or not project["source_url"]:
+        return jsonify(error="This project does not have a YouTube URL to download."),400
+    if project["source_path"]:
+        return jsonify(error="A source video is already attached to this project."),409
+    if not youtube_authentication_required(project["error"] or ""):
+        return jsonify(error="Use the Windows fallback only after a YouTube authentication error."),409
+    agents=[
+        agent for agent in agent_store.list_agents(session["user_id"],session["workspace_id"])
+        if agent["status"]=="Active" and agent["last_seen_at"]
+        and (datetime.now(timezone.utc)-datetime.fromisoformat(agent["last_seen_at"])).total_seconds()<90
+    ]
+    if not agents:
+        return jsonify(error="Start a paired Windows local agent, then try this download again."),409
+    agent=max(agents,key=lambda item:item["last_seen_at"])
+    stamp=datetime.now(timezone.utc).isoformat()
+    job_id=uuid.uuid4().hex
+    payload={
+        "jobType":"youtube_download",
+        "projectId":project["id"],
+        "sourceUrl":project["source_url"],
+    }
+    agent_store.create_job({
+        "id":job_id,
+        "user_id":session["user_id"],
+        "workspace_id":session["workspace_id"],
+        "agent_id":agent["id"],
+        "pin_to_agent":True,
+        "payload_json":json.dumps(payload,separators=(",",":")),
+        "created_at":stamp,
+    })
+    with db() as con:
+        con.execute("UPDATE projects SET status='Queued',error=NULL WHERE id=? AND workspace_id=?",
+                    (project["id"],session["workspace_id"]))
+    return jsonify(job={"id":job_id,"status":"Queued","stage":"Queued","progress":0,"createdAt":stamp}),202
+
+
 @app.post("/api/agent/runtime/heartbeat")
 def local_agent_heartbeat():
     unavailable=agent_metadata_available()
@@ -1999,9 +2061,20 @@ def update_local_agent_job(job_id):
     if not 0<=progress<=100:
         return jsonify(error="Job progress must be between 0 and 100."),400
     if status=="Canceled":
+        runtime_job=agent_store.runtime_job(job_id,agent["id"])
         if not agent_store.complete_canceled_job(job_id,agent["id"],datetime.now(timezone.utc).isoformat()):
             return jsonify(error="Cancellation was not requested for this active job."),409
+        if runtime_job:
+            payload=json.loads(runtime_job["payload_json"])
+            if payload.get("jobType")=="youtube_download":
+                with db() as con:
+                    con.execute(
+                        "UPDATE projects SET status='Ready to process',error=NULL "
+                        "WHERE id=? AND workspace_id=? AND source_path IS NULL",
+                        (payload["projectId"],agent["workspace_id"]),
+                    )
         return jsonify(ok=True)
+    runtime_job=agent_store.runtime_job(job_id,agent["id"])
     values={"status":status,"stage":stage,"progress":100 if status=="Succeeded" else progress}
     error=data.get("error")
     output_location=data.get("outputLocation")
@@ -2019,6 +2092,16 @@ def update_local_agent_job(job_id):
     )
     if not updated:
         return jsonify(error="Job is not active for this agent or cancellation was requested."),409
+    if status=="Failed" and runtime_job:
+        payload=json.loads(runtime_job["payload_json"])
+        if payload.get("jobType")=="youtube_download":
+            with db() as con:
+                con.execute(
+                    "UPDATE projects SET status='Failed',error=? "
+                    "WHERE id=? AND workspace_id=? AND source_path IS NULL",
+                    (values.get("error","Local YouTube download failed.")[:1000],
+                     payload["projectId"],agent["workspace_id"]),
+                )
     return jsonify(ok=True)
 
 
@@ -3101,17 +3184,12 @@ def clean_stale_storage_temporaries():
             app.logger.exception("Could not inspect stale transcription temporary %s",path.name)
 
 
-@app.post("/api/projects/<pid>/upload-sessions")
-def create_upload_session(pid):
-    project=get_project(pid)
-    data=request.get_json(silent=True)
-    if not isinstance(data,dict):return jsonify(error="Upload details must be an object."),400
-    filename=Path(str(data.get("filename") or "")).name.strip()
+def create_upload_session_record(project, filename, size):
+    filename=Path(str(filename or "")).name.strip()
     ext=Path(filename).suffix.lower()
-    raw_size=data.get("size")
-    if isinstance(raw_size,bool) or not isinstance(raw_size,(str,int)) or (isinstance(raw_size,str) and not raw_size.isdigit()):
+    if isinstance(size,bool) or not isinstance(size,(str,int)) or (isinstance(size,str) and not size.isdigit()):
         return jsonify(error="A valid file size is required."),400
-    size=int(raw_size)
+    size=int(size)
     if not filename or len(filename)>255 or ext not in ALLOWED:return jsonify(error="Choose a supported video or audio filename."),400
     if size<1 or size>app.config["MAX_CONTENT_LENGTH"]:return jsonify(error="This file is empty or exceeds the configured upload limit."),413
     clean_expired_upload_sessions()
@@ -3125,6 +3203,37 @@ def create_upload_session(pid):
         temp.unlink(missing_ok=True)
         raise
     return jsonify(uploadId=upload_id,offset=0,chunkSize=MAX_UPLOAD_CHUNK_BYTES),201
+
+
+def active_agent_youtube_job_context(job_id):
+    agent=request_agent()
+    if not agent:
+        return None,None,None,(jsonify(error="Local-agent authorization failed."),401)
+    job=agent_store.runtime_job(job_id,agent["id"])
+    if not job:
+        return None,None,None,(jsonify(error="This local-agent job is no longer active."),404)
+    try:
+        payload=json.loads(job["payload_json"])
+    except (TypeError,json.JSONDecodeError):
+        return None,None,None,(jsonify(error="The local-agent job payload is invalid."),400)
+    if payload.get("jobType")!="youtube_download" or not isinstance(payload.get("projectId"),str):
+        return None,None,None,(jsonify(error="This job cannot upload a YouTube source."),400)
+    with db() as con:
+        row=con.execute(
+            "SELECT * FROM projects WHERE id=? AND workspace_id=?",
+            (payload["projectId"],agent["workspace_id"]),
+        ).fetchone()
+    if not row or row["source_type"]!="youtube" or row["source_url"]!=payload.get("sourceUrl"):
+        return None,None,None,(jsonify(error="The YouTube project is no longer available to this agent."),404)
+    return agent,payload,dict(row),None
+
+
+@app.post("/api/projects/<pid>/upload-sessions")
+def create_upload_session(pid):
+    project=get_project(pid)
+    data=request.get_json(silent=True)
+    if not isinstance(data,dict):return jsonify(error="Upload details must be an object."),400
+    return create_upload_session_record(project,data.get("filename"),data.get("size"))
 
 
 @app.get("/api/upload-sessions/<upload_id>")
@@ -3171,14 +3280,88 @@ def write_upload_chunk(upload_id):
         return jsonify(uploadId=upload_id,offset=next_offset,receivedBytes=written)
 
 
-@app.post("/api/upload-sessions/<upload_id>/complete")
-def complete_upload_session(upload_id):
+@app.post("/api/agent/runtime/jobs/<job_id>/upload-sessions")
+def create_agent_youtube_upload_session(job_id):
+    agent,payload,project,error=active_agent_youtube_job_context(job_id)
+    if error:return error
+    data=request.get_json(silent=True)
+    if not isinstance(data,dict) or set(data)!={"filename","size"}:
+        return jsonify(error="Upload details must contain only filename and size."),400
+    filename=Path(str(data.get("filename") or "")).name
+    return create_upload_session_record(project,filename,data.get("size"))
+
+
+@app.put("/api/agent/runtime/jobs/<job_id>/upload-sessions/<upload_id>/chunk")
+def write_agent_youtube_upload_chunk(job_id,upload_id):
+    agent,payload,project,error=active_agent_youtube_job_context(job_id)
+    if error:return error
+    try:offset=int(request.args.get("offset",""));length=request.content_length
+    except (TypeError,ValueError):return jsonify(error="A valid upload offset is required."),400
+    if length is None or length<1 or length>MAX_UPLOAD_CHUNK_BYTES:
+        return jsonify(error=f"Each upload chunk must be 1–{MAX_UPLOAD_CHUNK_BYTES} bytes."),413
     lock=get_upload_lock(upload_id)
     with lock:
-        with db() as con:row=con.execute("SELECT * FROM upload_sessions WHERE id=? AND workspace_id=?",(upload_id,session["workspace_id"])).fetchone()
+        with db() as con:
+            row=con.execute(
+                "SELECT * FROM upload_sessions WHERE id=? AND workspace_id=? AND project_id=?",
+                (upload_id,agent["workspace_id"],project["id"]),
+            ).fetchone()
+        if not row:return jsonify(error="Upload session not found."),404
+        if offset!=row["received_bytes"]:return jsonify(error="Upload offset is out of date.",offset=row["received_bytes"]),409
+        if offset+length>row["expected_bytes"]:return jsonify(error="Chunk exceeds the declared file size."),400
+        path=Path(row["temp_path"]);written=0
+        try:
+            with path.open("r+b") as output:
+                output.truncate(offset)
+                output.seek(offset)
+                while written<length:
+                    block=request.stream.read(min(1024*1024,length-written))
+                    if not block:break
+                    output.write(block);written+=len(block)
+                output.flush();os.fsync(output.fileno())
+            if written!=length:raise RuntimeError("Chunk body length did not match Content-Length.")
+        except Exception as exc:
+            try:
+                with path.open("r+b") as output:output.truncate(offset)
+            except OSError:pass
+            return jsonify(error=str(exc) if isinstance(exc,RuntimeError) else "Could not persist this upload chunk."),400
+        next_offset=offset+written;stamp=now()
+        with db() as con:
+            updated=con.execute(
+                "UPDATE upload_sessions SET received_bytes=?,updated_at=? "
+                "WHERE id=? AND workspace_id=? AND project_id=? AND received_bytes=?",
+                (next_offset,stamp,upload_id,agent["workspace_id"],project["id"],offset),
+            )
+        if updated.rowcount!=1:
+            with path.open("r+b") as output:output.truncate(offset)
+            return jsonify(error="Upload offset changed; request the current session state."),409
+    return jsonify(uploadId=upload_id,offset=next_offset,receivedBytes=written)
+
+
+@app.post("/api/upload-sessions/<upload_id>/complete")
+def complete_upload_session(upload_id):
+    return complete_upload_session_for_workspace(upload_id,session["workspace_id"])
+
+
+def complete_upload_session_for_workspace(upload_id,workspace_id,expected_project_id=None):
+    lock=get_upload_lock(upload_id)
+    with lock:
+        with db() as con:
+            row=con.execute(
+                "SELECT * FROM upload_sessions WHERE id=? AND workspace_id=?",
+                (upload_id,workspace_id),
+            ).fetchone()
         if not row:abort(404,"Upload session not found.")
+        if expected_project_id and row["project_id"]!=expected_project_id:
+            abort(404,"Upload session not found.")
         if row["received_bytes"]!=row["expected_bytes"]:return jsonify(error="Upload is incomplete.",offset=row["received_bytes"],expectedBytes=row["expected_bytes"]),409
-        project=get_project(row["project_id"])
+        with db() as con:
+            project_row=con.execute(
+                "SELECT * FROM projects WHERE id=? AND workspace_id=?",
+                (row["project_id"],workspace_id),
+            ).fetchone()
+        if not project_row:abort(404,"Project not found.")
+        project=dict(project_row)
         temp=Path(row["temp_path"])
         if not temp.is_file() or temp.stat().st_size!=row["expected_bytes"]:return jsonify(error="Uploaded file is missing or incomplete; resume the upload."),409
         dest=UPLOADS/f"{project['id']}-{upload_id}{row['extension']}"
@@ -3192,9 +3375,15 @@ def complete_upload_session(upload_id):
             temp.unlink(missing_ok=True);dest.unlink(missing_ok=True)
             with db() as con:con.execute("DELETE FROM upload_sessions WHERE id=?",(upload_id,))
             return jsonify(error=f"Could not read this media file: {exc}"),400
+        keep_youtube_url=project["source_type"]=="youtube" and expected_project_id is not None
         with db() as con:
-            con.execute("UPDATE projects SET source_path=?,source_url=NULL,duration=?,media_width=?,media_height=?,media_fps=?,media_has_video=?,media_has_audio=?,thumbnail_path=?,status='Ready to process',error=NULL WHERE id=? AND workspace_id=?",
-                (str(dest),duration,media["width"],media["height"],media["fps"],int(media["has_video"]),int(media["has_audio"]),media["thumbnail_path"],project["id"],session["workspace_id"]))
+            con.execute(
+                "UPDATE projects SET source_path=?,source_url=CASE WHEN ? THEN source_url ELSE NULL END,"
+                "duration=?,media_width=?,media_height=?,media_fps=?,media_has_video=?,media_has_audio=?,"
+                "thumbnail_path=?,status='Ready to process',error=NULL WHERE id=? AND workspace_id=?",
+                (str(dest),int(keep_youtube_url),duration,media["width"],media["height"],media["fps"],
+                 int(media["has_video"]),int(media["has_audio"]),media["thumbnail_path"],project["id"],workspace_id),
+            )
             con.execute("DELETE FROM upload_sessions WHERE id=?",(upload_id,))
         if old_source and old_source!=str(dest):
             with db() as con:still_used=con.execute("SELECT 1 FROM projects WHERE source_path=? LIMIT 1",(old_source,)).fetchone()
@@ -3203,6 +3392,15 @@ def complete_upload_session(upload_id):
             with db() as con:still_used=con.execute("SELECT 1 FROM projects WHERE thumbnail_path=? LIMIT 1",(old_thumbnail,)).fetchone()
             if not still_used:unlink_if_under(old_thumbnail,THUMBNAILS)
         return jsonify(project={"id":project["id"],"status":"Ready to process","duration":duration,"filename":row["filename"],"width":media["width"],"height":media["height"],"frameRate":media["fps"],"hasVideo":media["has_video"],"hasAudio":media["has_audio"],"hasThumbnail":bool(media["thumbnail_path"])})
+
+
+@app.post("/api/agent/runtime/jobs/<job_id>/upload-sessions/<upload_id>/complete")
+def complete_agent_youtube_upload_session(job_id,upload_id):
+    agent,payload,project,error=active_agent_youtube_job_context(job_id)
+    if error:return error
+    return complete_upload_session_for_workspace(
+        upload_id,agent["workspace_id"],expected_project_id=project["id"]
+    )
 
 
 @app.delete("/api/upload-sessions/<upload_id>")
@@ -3275,12 +3473,17 @@ def fetch_youtube(pid, url, job_id=None):
                "ffmpeg_location":ffmpeg_path(),"js_runtimes": {"node": {}}, "concurrent_fragment_downloads":4,
                "socket_timeout":10,"retries":2,"fragment_retries":2,
                "progress_hooks":[youtube_download_progress_hook(job_id)] if job_id else []}
-    with yt_dlp.YoutubeDL(options) as ydl:
-        info = ydl.extract_info(url, download=True)
-        if job_id:update_processing_progress(job_id,"Inspecting source",0,"Download finished; validating the saved video.")
-        path = Path(ydl.prepare_filename(info)).with_suffix(".mp4")
-        if not path.exists():
-            path = Path(ydl.prepare_filename(info))
+    try:
+        with yt_dlp.YoutubeDL(options) as ydl:
+            info = ydl.extract_info(url, download=True)
+    except DownloadError as exc:
+        if youtube_authentication_required(exc):
+            raise NonRetryableProcessingError(YOUTUBE_AUTHENTICATION_REQUIRED) from None
+        raise
+    if job_id:update_processing_progress(job_id,"Inspecting source",0,"Download finished; validating the saved video.")
+    path = Path(ydl.prepare_filename(info)).with_suffix(".mp4")
+    if not path.exists():
+        path = Path(ydl.prepare_filename(info))
     if not path.exists():
         raise RuntimeError("YouTube source download did not produce a media file.")
     duration = probe_duration(path)
@@ -3801,7 +4004,7 @@ def process_project(pid,job_id):
     if existing is not None:
         update_processing_progress(job_id,"Reusing transcript",99,f"Reusing {len(existing)} saved transcript segments; no transcription request is needed.")
         segments=[{"start":s["start"],"end":s["end"],"text":s["text"],"words":json.loads(s["words_json"]) if s["words_json"] else []} for s in existing]
-    elif row["source_type"]=="youtube":
+    elif row["source_type"]=="youtube" and row["source_url"]:
         update_processing_progress(job_id,"Getting YouTube captions",0,"Checking available captions and the selected language.")
         segments=fetch_youtube_transcript(row["source_url"],row["language"],job_id)
     else:
@@ -3891,15 +4094,27 @@ def generate(pid):
         if latest and latest["status"]=="Failed":
             if "YouTube captions are disabled for this video." in (latest["error"] or ""):
                 return jsonify(error="YouTube captions are disabled for this video. Retrying cannot retrieve them. Choose a video with available captions; audio transcription is not started automatically."),422
+            if youtube_authentication_required(latest["error"] or "") and not row["source_path"]:
+                return jsonify(error=YOUTUBE_AUTHENTICATION_REQUIRED),422
             if latest["attempts"]>=latest["max_attempts"]:
-                retired_gemini_model="models/gemini-2.5-flash is no longer available" in (latest["error"] or "").lower()
-                if not retired_gemini_model:
-                    return jsonify(error="This processing job reached its retry limit. Create a new project to run a fresh job."),429
-                con.execute("UPDATE processing_jobs SET max_attempts=max_attempts+1 WHERE id=? AND status='Failed' AND attempts>=max_attempts",(latest["id"],))
-            stamp=now()
-            con.execute("UPDATE processing_jobs SET status='Queued',stage='Queued',progress=0,progress_detail=NULL,error=NULL,finished_at=NULL,updated_at=? WHERE id=?",(stamp,latest["id"]))
-            con.execute("UPDATE projects SET status='Queued',error=NULL WHERE id=?",(pid,))
-            job_id=latest["id"]
+                if row["source_path"] and youtube_authentication_required(latest["error"] or ""):
+                    job_id=uuid.uuid4().hex;stamp=now()
+                    con.execute("INSERT INTO processing_jobs(id,project_id,status,stage,attempts,max_attempts,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)",
+                        (job_id,pid,"Queued","Queued",0,3,stamp,stamp))
+                    con.execute("UPDATE projects SET status='Queued',error=NULL WHERE id=?",(pid,))
+                    latest=None
+                else:
+                    retired_gemini_model="models/gemini-2.5-flash is no longer available" in (latest["error"] or "").lower()
+                    if not retired_gemini_model:
+                        return jsonify(error="This processing job reached its retry limit. Create a new project to run a fresh job."),429
+                    con.execute("UPDATE processing_jobs SET max_attempts=max_attempts+1 WHERE id=? AND status='Failed' AND attempts>=max_attempts",(latest["id"],))
+            if latest is None:
+                pass
+            else:
+                stamp=now()
+                con.execute("UPDATE processing_jobs SET status='Queued',stage='Queued',progress=0,progress_detail=NULL,error=NULL,finished_at=NULL,updated_at=? WHERE id=?",(stamp,latest["id"]))
+                con.execute("UPDATE projects SET status='Queued',error=NULL WHERE id=?",(pid,))
+                job_id=latest["id"]
         else:
             job_id=uuid.uuid4().hex;stamp=now()
             con.execute("INSERT INTO processing_jobs(id,project_id,status,stage,attempts,max_attempts,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)",
@@ -3941,7 +4156,13 @@ def project_detail(pid):
                     (job["created_at"],job["created_at"],job["id"])).fetchone()[0]
             item_job["queue_position"]=position
         job_items.append(item_job)
-    item=clean_project(row);item["source_name"]=Path(row["source_path"]).name if row["source_path"] else None;item["clips"]=clip_items;item["jobs"]=job_items;item["worker"]=worker_status();item["export_worker"]=worker_status("export")
+    agent_jobs=[]
+    if not (PUBLIC_DEPLOYMENT and not agent_store._postgres):
+        agent_jobs=[
+            job for job in agent_store.list_jobs(session["user_id"],session["workspace_id"])
+            if job.get("project_id")==pid
+        ]
+    item=clean_project(row);item["source_name"]=Path(row["source_path"]).name if row["source_path"] else None;item["clips"]=clip_items;item["jobs"]=job_items;item["agent_jobs"]=agent_jobs;item["worker"]=worker_status();item["export_worker"]=worker_status("export")
     return jsonify(project=item)
 
 

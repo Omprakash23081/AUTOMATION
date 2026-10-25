@@ -17,7 +17,7 @@ Deploy in this order: create the Netlify site and note its hostname; configure a
    | `CUTROOM_PUBLIC_DEPLOYMENT` | `true` (explicitly opts into public access; local-only defaults otherwise remain active) |
    | `CUTROOM_ALLOWED_HOSTS` | Exact Netlify and any custom hostnames, e.g. `cutroom7.netlify.app`; Render's own hostname is added automatically |
    | `DATABASE_URL` | Managed PostgreSQL connection URL; required for local-agent metadata endpoints. Keep it only in Render secrets. |
-   | `CUTROOM_AGENT_TESTER_EMAILS` | Comma-separated exact email addresses for the 3–4 private testers allowed to pair agents and submit local-agent jobs. Required to approve agents in public mode. |
+   | `CUTROOM_AGENT_TESTER_EMAILS` | Comma-separated exact email addresses for the 3–5 private testers allowed to pair agents and submit local-agent jobs. Required to approve agents in public mode. |
    | `CUTROOM_ALLOWED_ORIGINS` | Exact Netlify browser origin, e.g. `https://my-cutroom.netlify.app`, comma-separated; no paths or trailing slash. Include only production origins you trust. |
    | `CUTROOM_DATA` | `/var/data` (the mounted persistent disk) |
    | `CUTROOM_MODE` | `combined`; API and the existing in-process processing/export loops run in this one service process |
@@ -74,13 +74,13 @@ The local-agent migration is **in progress, not complete**. The backend has Post
 ### Private Windows tester setup
 
 1. For a public Render service, keep the persistent disk and configure `DATABASE_URL` to the managed PostgreSQL URL and `CUTROOM_AGENT_TESTER_EMAILS` to the exact tester addresses. The tester allowlist is checked on authenticated dashboard endpoints and agent API requests. Do not put these values in Netlify or browser code.
-2. From the repository root on each authorized Windows computer, install Python 3 with the Windows `py` launcher. The pairing, self-test, and polling client use only the standard library. For local video sync, install the two small runtime dependencies used by the existing FFmpeg renderer:
+2. From the repository root on each authorized Windows computer, install Python 3 with the Windows `py` launcher. Install the local-agent media dependencies, including the current yt-dlp release:
 
    ```powershell
-   py -3 -m pip install imageio-ffmpeg python-dotenv
+   py -3 -m pip install imageio-ffmpeg python-dotenv "yt-dlp[default]>=2026.10.21"
    ```
 
-   Playwright browsers and AI credentials are not needed for this basic local render. Then pair the computer:
+   Playwright browsers and AI credentials are not needed for local YouTube downloading or the basic local render. Then pair the computer:
 
    ```powershell
    .\start_local_agent.bat pair --api-url https://cutroom7.netlify.app --name "Om's Windows PC"
@@ -90,10 +90,10 @@ The local-agent migration is **in progress, not complete**. The backend has Post
 3. After the CLI confirms pairing, start the agent with:
 
    ```powershell
-   .\start_local_agent.bat run --api-url https://cutroom7.netlify.app
+   .\start_local_agent.bat run --api-url https://cutroom7.netlify.app --browser edge
    ```
 
-   The bearer token is stored only in `%LOCALAPPDATA%\Cutroom\agent-token.dpapi`, protected with Windows DPAPI for the current Windows user. The agent makes outbound HTTPS requests only; it does not expose a local HTTP listener. Restarting the command reuses the protected credential.
+   Choose `chrome`, `edge`, or `firefox` to let yt-dlp read that browser's local session when YouTube requires sign-in. This setting is local to the agent and is not sent to Render. Omit `--browser` to download without using browser cookies. The bearer token is stored only in `%LOCALAPPDATA%\Cutroom\agent-token.dpapi`, protected with Windows DPAPI for the current Windows user. The agent makes outbound HTTPS requests only; it does not expose a local HTTP listener. Restarting the command reuses the protected credential.
 4. In **Account settings**, queue **Harmless agent test**. The agent claims the job with its bearer token, runs a fixed local self-test (no download, browser, file access, or shell command), and reports `Succeeded`. The account settings job list displays the state. Revoke a computer from the same panel if needed.
 5. Stop the agent with Ctrl+C. If it reports that credentials were rejected or revoked, the stored token is deleted; pair that computer again. Temporary network failures are retried. A running job is heartbeat-leased; if the agent stops unexpectedly, the job becomes retryable after the 90-second lease expires and counts against its three-attempt limit.
 
@@ -119,6 +119,7 @@ To run the focused local checks from the repository root:
 
 ```powershell
 py -3 -m unittest discover -s tests -p "test_local_agent.py"
+py -3 -m unittest discover -s tests -p "test_local_youtube_download.py"
 py -3 -m unittest discover -s tests -p "test_local_video.py"
 py -3 -m unittest discover -s tests -p "test_agent_store.py"
 py -3 -m unittest discover -s tests -p "test_automation_integration.py"
@@ -126,6 +127,16 @@ py -3 -m unittest discover -s tests -p "test_automation_integration.py"
 
 The Flask-backed pairing, isolation, revocation, and end-to-end self-test cases are in `tests/test_server.py`; run `py -3 -m unittest discover -s tests -p "test_server.py"` to execute that integration suite.
 
-The agent supports only its fixed `agent_self_test` and `video_sync` job types; it rejects unknown job types rather than treating payload data as a command. The backend does not receive media bytes or local input paths. Browser-based media upload, automatic downloading/transcription, semantic scene matching, and Playwright workflows are not part of this local-agent slice.
+## YouTube sign-in fallback
+
+When a Render download receives YouTube's sign-in-to-confirm-you-are-not-a-bot response, the processing job stops without retrying the authentication-required request. The project page offers **Download with paired Windows agent**. Keep the paired agent running on the tester's own computer and start it with the browser profile in which that tester is signed in, for example:
+
+```powershell
+.\start_local_agent.bat run --api-url https://cutroom7.netlify.app --browser edge
+```
+
+The website queues the project-specific job and shows its download/upload progress. yt-dlp reads the selected browser session only on that Windows computer; browser cookies are never uploaded to Render or included in agent status/error messages. The video itself is transferred to the existing Render project using bounded, resumable chunks so the current transcription and clip-generation pipeline can continue. This hybrid flow therefore keeps authentication local, but the source video is stored on the Render disk after upload. It does not keep the large source file exclusively on the tester's PC.
+
+The agent accepts only the fixed `agent_self_test`, `video_sync`, and project-bound `youtube_download` job types; it rejects unknown job types rather than treating payload data as a command. Paths are not submitted by the browser or accepted as job instructions. This does not move transcription, semantic clip selection, or rendering to Windows. Other sources and the regular server-side YouTube path remain unchanged.
 
 Do not remove the existing Render disk or move the service to ephemeral/free storage yet. The remaining SQLite-backed account and OAuth data still needs a verified, non-destructive PostgreSQL migration before that would be safe. No SQLite database, media, or user data is automatically copied or deleted by this incremental change.
