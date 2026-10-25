@@ -250,3 +250,7 @@ data/
 **/Cache/
 **/Service Worker/CacheStorage/
 /data/
+YOUTUBE_VIDEO_AUTOMATION/.git-backup/
+
+YOUTUBE_VIDEO_AUTOMATION/links.txt
+YOUTUBE_VIDEO_AUTOMATION/ytlink.txt

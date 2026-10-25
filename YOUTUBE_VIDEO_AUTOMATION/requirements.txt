@@ -1,0 +1,9 @@
+requests
+python-dotenv
+cartesia
+playwright
+yt-dlp[default]
+imageio-ffmpeg
+faster-whisper
+youtube-transcript-api
+streamlit
