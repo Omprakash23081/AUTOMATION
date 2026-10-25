@@ -179,3 +179,49 @@ pyrightconfig.json
 playwright_profile/
 browser_profile/
 downloads/
+
+# Local virtual environments and Python caches.
+venv/
+.venv/
+__pycache__/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local runtime data, outputs, and archives.
+data/
+outputs/
+output/
+backups/
+.git-backup/
+*.sqlite
+*.sqlite3
+*.db
+*.db-journal
+*.zip
+
+# Generated media and partial downloads; keep source and test code.
+*.mp4
+*.mov
+*.mkv
+*.m4v
+*.webm
+*.mp3
+*.m4a
+*.wav
+*.aac
+*.flac
+*.ogg
+*.part
+*.tmp
+*.log
+
+# Local source URL lists.
+links.txt
+ytlink.txt
+
+# OS/editor files.
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store

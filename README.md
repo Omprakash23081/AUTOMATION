@@ -4,12 +4,14 @@ Cutroom is a personal-use app that runs on your Windows computer; you do not nee
 
 An optional, constrained Netlify + Render deployment preview is documented in [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md). It does not change the local workflow and is not a horizontally scalable or production-reviewed media service.
 
+The browser application source is in `frontend/`, and the Flask application, Python helpers, and dependency manifest are in `backend/`. Root-level launchers and compatibility imports preserve the existing local commands and `server:app` WSGI entry point. Local runtime files remain in the repository-root `data/` folder.
+
 ## Start on Windows
 
 Run `setup.bat` once to install dependencies, then `start.bat` whenever you want to use Cutroom. `start.bat` no longer installs packages on every launch. Or use PowerShell:
 
 ```powershell
-python -m pip install -r requirements.txt
+python -m pip install -r backend/requirements.txt
 python -m playwright install chromium
 python start_local.py
 ```
@@ -30,7 +32,7 @@ Cutroom requests YouTube read access and video upload access. The browser never 
 The standalone browser module can be smoke-tested before running a clip job:
 
 ```powershell
-.\.venv\Scripts\python.exe chatgpt_browser_automation.py --smoke-test --keep-open
+.\.venv\Scripts\python.exe backend\chatgpt_browser_automation.py --smoke-test --keep-open
 ```
 
 This opens the persistent profile and checks that it navigates to `chatgpt.com` without sending a prompt; the browser remains open until you press Enter. Add `--wait-for-composer` to verify the signed-in ChatGPT composer too; the visible browser lets you sign in or complete a challenge manually while it waits. The pipeline uses this same module. On Windows it launches a visible browser by default; Docker Compose explicitly runs headlessly and cannot display a Windows desktop window. Progress reports browser launch, navigation, composer wait, and detected human-verification stages separately.

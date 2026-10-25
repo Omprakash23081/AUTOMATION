@@ -25,6 +25,7 @@ if (
 }
 
 const root = path.resolve(__dirname, "..");
+const frontend = path.join(root, "frontend");
 const output = path.join(root, "netlify-dist");
 const publicFiles = [
   "index.html",
@@ -48,14 +49,16 @@ const publicFiles = [
 fs.rmSync(output, { recursive: true, force: true });
 fs.mkdirSync(output, { recursive: true });
 for (const file of publicFiles) {
-  fs.copyFileSync(path.join(root, file), path.join(output, file));
+  fs.copyFileSync(path.join(frontend, file), path.join(output, file));
 }
-const configPath = path.join(root, "api-config.js");
-const config = fs.readFileSync(configPath, "utf8").replace(
-  'window.CUTROOM_API_BASE_URL = "";',
-  `window.CUTROOM_API_BASE_URL = ${JSON.stringify(apiUrl.origin)};`,
-);
-if (config === fs.readFileSync(configPath, "utf8")) {
-  throw new Error("Could not inject CUTROOM_API_BASE_URL into api-config.js.");
+const configPath = path.join(frontend, "api-config.js");
+const config = fs.readFileSync(configPath, "utf8");
+if (!config.includes('window.CUTROOM_API_BASE_URL = "";')) {
+  throw new Error("The frontend API config must default to same-origin requests for the Netlify proxy.");
 }
 fs.writeFileSync(path.join(output, "api-config.js"), config, { encoding: "utf8" });
+fs.writeFileSync(
+  path.join(output, "_redirects"),
+  `/api/* ${apiUrl.origin}/api/:splat 200\n/* /index.html 200\n`,
+  { encoding: "utf8" },
+);

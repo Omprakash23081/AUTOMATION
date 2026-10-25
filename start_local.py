@@ -2,10 +2,9 @@
 from __future__ import annotations
 
 import os
-import runpy
 from pathlib import Path
 
-from local_config import load_local_secrets
+from backend.local_config import load_local_secrets
 
 ROOT = Path(__file__).resolve().parent
 
@@ -13,4 +12,6 @@ ROOT = Path(__file__).resolve().parent
 if __name__ == "__main__":
     load_local_secrets()
     os.chdir(ROOT)
-    runpy.run_path(str(ROOT / "server.py"), run_name="__main__")
+    import server
+
+    server.main()

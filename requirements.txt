@@ -1,13 +1,1 @@
-Flask>=3.0,<4
-gunicorn>=23,<24
-openai>=1.60,<3
-google-genai>=1,<2
-imageio-ffmpeg>=0.5.1,<1
-yt-dlp>=2025.1.15
-youtube-transcript-api>=1.2,<2
-opencv-python-headless>=4.10,<5
-cryptography>=44,<52
-playwright>=1.50,<2
-python-dotenv>=1,<2
-requests>=2.31,<3
-faster-whisper>=1.1,<2
+-r backend/requirements.txt

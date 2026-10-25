@@ -192,21 +192,24 @@ pyrightconfig.json
 .env.*
 !.env.example
 
-# Local runtime data includes SQLite, uploads, exports, thumbnails,
-# automation inputs/outputs, and browser profiles.
+# Runtime data contains uploads, generated clips, thumbnails, SQLite, and jobs.
 /data/
 **/data/
 /data-local-backup-*/
 **/data-local-backup-*/
-/chatgpt_profile/
-/gemini_profile/
-/fallback_profile/
-**/*_profile/
-**/playwright/.cache/
-
-# Local archives and database files.
 /backups/
 **/backups/
+
+# Browser profiles and their caches can contain signed-in sessions.
+**/*_profile/
+**/browser_profile/
+**/playwright/.cache/
+**/Cache/
+**/Code Cache/
+**/GPUCache/
+**/Service Worker/CacheStorage/
+
+# Local database files and backup archives.
 *.sqlite
 *.sqlite3
 *.sqlite3-*
@@ -214,7 +217,7 @@ pyrightconfig.json
 *.db-journal
 *.zip
 
-# Generated media. Keep source code and dependency/configuration files.
+# Generated media and resumable-upload fragments, not source assets.
 *.mp4
 *.mov
 *.mkv
@@ -230,7 +233,7 @@ pyrightconfig.json
 *.tmp
 *.log
 
-# Local dependencies, caches, editor state, and deployment build output.
+# Local tooling, caches, and generated deployment/runtime reports.
 **/node_modules/
 **/.venv/
 **/venv/
@@ -240,17 +243,10 @@ pyrightconfig.json
 **/.ruff_cache/
 **/.vscode/
 **/.idea/
+/.tsupgrader/
 /netlify-dist/
+/.git-backup/
 
-
-data/
-**/data/
-**/Code Cache/
-**/GPUCache/
-**/Cache/
-**/Service Worker/CacheStorage/
-/data/
-YOUTUBE_VIDEO_AUTOMATION/.git-backup/
-
-YOUTUBE_VIDEO_AUTOMATION/links.txt
-YOUTUBE_VIDEO_AUTOMATION/ytlink.txt
+# Local source URL lists used by the nested automation project.
+/YOUTUBE_VIDEO_AUTOMATION/links.txt
+/YOUTUBE_VIDEO_AUTOMATION/ytlink.txt

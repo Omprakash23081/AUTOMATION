@@ -20,7 +20,7 @@ services:
       - key: CUTROOM_DATA
         value: /var/data
       - key: CUTROOM_ALLOWED_HOSTS
-        value: cutroom-api.onrender.com
+        sync: false
       - key: CUTROOM_ALLOWED_ORIGINS
         sync: false
       - key: SESSION_SECRET
